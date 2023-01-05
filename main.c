@@ -62,7 +62,7 @@ static void open_response(GtkDialog *dialog, int res)
         if (g_file_load_contents(file, NULL, &content, &size, NULL, NULL))
         {
             printf("size: %ld\n", size);
-            e_file_handler(content, size);
+            e_file_handler((unsigned char*)content, size);
             free(content);
         }
     }
