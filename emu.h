@@ -2,7 +2,18 @@
 #include <stdio.h>
 #include <string.h>
 
-#define STACK_RESET 0x01FF
+#define STACK_RESET         0x01FF
+#define RAM                 0x0000
+#define RAM_MIRRORS_END     0x1FFF
+#define PPU_REGISTERS       0x2000
+#define PPU_REGISTERS_END   0x3FFF
+
+enum Mirroring
+{
+    VERTICAL,
+    HORIZONTAL,
+    FOUR_SCREEN
+};
 
 enum ProcessorStatus
 {
@@ -32,6 +43,21 @@ enum AddressingMode
     None_Addressing
 };
 
+typedef struct Rom
+{
+    unsigned char   *prg_rom,
+                    *chr_rom,
+                    mapper;
+
+    enum Mirroring screen_mirroring;
+} Rom;
+
+typedef struct Bus
+{
+    unsigned char cpu_vram[2048];
+    Rom rom;
+} Bus;
+
 typedef struct CPU
 {
     unsigned char   register_a, 
@@ -43,6 +69,8 @@ typedef struct CPU
     unsigned char   memory[0xFFFF];
 
     unsigned short program_counter;
+
+    Bus bus;
 } CPU;
 
 typedef struct Emulator
@@ -50,6 +78,99 @@ typedef struct Emulator
     CPU cpu;
 } Emulator;
 
+
+static void rom_load(Rom *rom, unsigned char data[])
+{
+    if (data[0] != 'N' && data[1] != 'E' 
+    && data[2] != 'S'&& data[3] != 0x1A)
+    {
+        printf("File is not in iNES file format!\n");
+        return;
+    }
+
+    unsigned char ines_ver = (data[7] >> 2) & 0b11;
+
+    if (ines_ver != 0)
+    {
+        printf("iNES2.0 format not supported!\n");
+        return;
+    }
+
+    rom->mapper = (data[7] & 0b11110000) | (data[6] >> 4);
+
+    if (data[6] & 0b1000)   rom->screen_mirroring = FOUR_SCREEN;
+    else if (data[6] & 0b1) rom->screen_mirroring = VERTICAL;
+    else                    rom->screen_mirroring = HORIZONTAL;
+
+    unsigned char   prg_rom_size = data[4] * (1024 * 16),
+                    chr_rom_size = data[5] * (1024 * 8);
+
+                                    // check if trainer is set, else skip
+    unsigned char   prg_rom_start = (data[6] & 0b100) ? 512 + 16 : 16,
+                    chr_rom_start = prg_rom_start + prg_rom_size;
+    
+    rom->prg_rom = malloc(prg_rom_size);
+    rom->chr_rom = malloc(chr_rom_size);
+
+    int i = 0;
+
+    for (; i < prg_rom_start + prg_rom_size; i++)
+        rom->prg_rom[i] = data[prg_rom_start + i];
+    
+    for (i = 0; i < chr_rom_start + chr_rom_size; i++)
+        rom->chr_rom[i] = data[chr_rom_start + i];
+}
+
+static unsigned char rom_read_prg_rom(Bus *bus, unsigned short addr)
+{
+    addr -= 0x8000;
+
+    if (strlen((char*)bus->rom.prg_rom) == 0x4000 && addr >= 0x4000)
+    {
+        addr %= 0x4000;
+    }
+
+    return bus->rom.prg_rom[addr];
+}
+
+static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
+{
+    unsigned char mem_addr = 0;
+
+    switch (addr)
+    {
+        case RAM ... RAM_MIRRORS_END:
+            mem_addr = bus->cpu_vram[addr & 0b0000011111111111];
+            break;
+        case PPU_REGISTERS ... PPU_REGISTERS_END:
+            mem_addr = bus->cpu_vram[addr & 0b0010000000000111];
+            break;
+        case 0x8000 ... 0xFFFF:
+            mem_addr = rom_read_prg_rom(bus, addr);
+            break;
+        default: 
+            break;
+    }
+
+    return mem_addr;
+}
+
+static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
+{
+    switch (addr)
+    {
+        case RAM ... RAM_MIRRORS_END:
+            bus->cpu_vram[addr & 0b1111111111111111] = data;
+            break;
+        case PPU_REGISTERS ... PPU_REGISTERS_END:
+            bus->cpu_vram[addr & 0b0010000000000111] = data;
+            break;
+        case 0x8000 ... 0xFFFF:
+            printf("Attempt to write to cartridge ROM space!\n");
+            break;
+        default: break;
+    }
+}
 
 static unsigned char cpu_mem_read(unsigned char memory[], unsigned short addr)
 {
@@ -107,11 +228,6 @@ static void cpu_sed(unsigned char *status)
     *status = *status | Decimal_Mode_Flag;
 }
 
-static void cpu_sec(unsigned char *status)
-{
-    *status = *status | Decimal_Mode_Flag;
-}
-
 static void cpu_cli(unsigned char *status)
 {
     *status = *status & 0b11111011;
@@ -143,7 +259,7 @@ static void cpu_reset(CPU *cpu)
     cpu->register_x = 0;
     cpu->register_y = 0;
     cpu->status = 0;
-    cpu->stack_pointer = STACK_RESET;
+    cpu->stack_pointer = 0;
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFC);
 }
 
@@ -400,11 +516,6 @@ static void cpu_lax(CPU *cpu, enum AddressingMode mode)
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_x);
 }
 
-static void cpu_dop()
-{
-    // jump over extra byte
-}
-
 static void cpu_rla(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
@@ -568,32 +679,51 @@ static void cpu_and(CPU *cpu, enum AddressingMode mode)
         &cpu->status, cpu->register_a & cpu->memory[addr]);
 }
 
-static void cpu_bcc(CPU *cpu, enum AddressingMode mode)
+static int cpu_bcc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Carry_Flag) == 0)
+    {
         cpu->program_counter += (char)cpu->memory[addr];
+        jmp = 1;
+    }
+
+    return jmp;
 }
 
-static void cpu_bcs(CPU *cpu, enum AddressingMode mode)
+static int cpu_bcs(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Carry_Flag) != 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
-static void cpu_beq(CPU *cpu, enum AddressingMode mode)
+static int cpu_beq(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Zero_Flag) != 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
-static void cpu_bne(CPU *cpu, enum AddressingMode mode)
+static int cpu_bne(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Zero_Flag) == 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
 static void cpu_bit(CPU *cpu, enum AddressingMode mode)
@@ -611,32 +741,48 @@ static void cpu_bit(CPU *cpu, enum AddressingMode mode)
     cpu->status = cpu->status | b7;
 }
 
-static void cpu_bmi(CPU *cpu, enum AddressingMode mode)
+static int cpu_bmi(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Negative_Flag) != 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
-static void cpu_bpl(CPU *cpu, enum AddressingMode mode)
+static int cpu_bpl(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Negative_Flag) == 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
-static void cpu_bvc(CPU *cpu, enum AddressingMode mode)
+static int cpu_bvc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+    
     if ((cpu->status & Overflow_Flag) == 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
-static void cpu_bvs(CPU *cpu, enum AddressingMode mode)
+static int cpu_bvs(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    int jmp = 0;
+
     if ((cpu->status & Overflow_Flag) != 0)
         cpu->program_counter += (char)cpu->memory[addr];
+
+    return jmp;
 }
 
 static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
@@ -844,7 +990,7 @@ static void cpu_sty(CPU *cpu, enum AddressingMode mode)
 static void cpu_tsx(CPU *cpu)
 {
     cpu->register_x = cpu->memory[cpu->stack_pointer];
-    cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_txs(CPU *cpu)
@@ -868,7 +1014,7 @@ static void cpu_pla(CPU *cpu)
 {
     cpu->register_a = cpu->memory[cpu->stack_pointer];
     cpu->stack_pointer += 1;
-    cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_plp(CPU *cpu)
@@ -893,7 +1039,7 @@ static void cpu_rol(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
     else
     {
@@ -911,7 +1057,7 @@ static void cpu_rol(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->memory[addr]);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->memory[addr]);
     }
 }
 
@@ -935,7 +1081,7 @@ static void cpu_ror(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
     else
     {
@@ -957,7 +1103,7 @@ static void cpu_ror(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->memory[addr]);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->memory[addr]);
     }
 }
 
@@ -975,7 +1121,7 @@ static void cpu_asl(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b01111111;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
     else
     {
@@ -991,7 +1137,7 @@ static void cpu_asl(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b01111111;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->memory[addr]);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->memory[addr]);
     }
 }
 
@@ -1009,18 +1155,18 @@ static void cpu_lsr(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->register_a);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
     else
     {
         unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-        unsigned char old_bit = cpu->memory[addr];
+        //unsigned char old_bit = cpu->memory[addr];
 
         cpu->memory[addr] >>= 1;
         cpu->memory[addr] = cpu->memory[addr] & 0b011111111;
 
-        cpu_update_zero_and_negative_flags(cpu->status, cpu->memory[addr]);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu->memory[addr]);
     }
 }
 
@@ -1068,7 +1214,6 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
             case 0x52:
             case 0x62:
             case 0x72:
-            case 0x82:
             case 0x92:
             case 0xB2:
             case 0xD2:
@@ -1274,6 +1419,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu->program_counter += 1;
                 break;
             /*  adc end     */
+
             case 0xE9:
                 cpu_sbc(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1514,10 +1660,12 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_ora(cpu, Indirect_Y);
                 cpu->program_counter += 1;
                 break;
+
             case 0x58: cpu_cli(&cpu->status);
                 break;
             case 0x78: cpu_sei(&cpu->status);
                 break;
+
             /*      STA begin   */
             case 0x85:
                 cpu_sta(cpu, Zero_Page);
@@ -1548,6 +1696,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu->program_counter += 1;
                 break;
             /*      STA end     */
+
             case 0x86:
                 cpu_stx(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1560,6 +1709,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_stx(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
+
             case 0x84:
                 cpu_sty(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1572,6 +1722,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_sty(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
+
             case 0xA9: 
                 cpu_lda(cpu, Immediate); 
                 cpu->program_counter += 1; 
@@ -1604,6 +1755,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_lda(cpu, Indirect_Y);
                 cpu->program_counter += 1;
                 break;
+
             case 0xAA: cpu_tax(cpu);
                 break;
             case 0x8A: cpu_txa(cpu);
@@ -1612,6 +1764,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 break;
             case 0x98: cpu_tya(cpu);
                 break;
+
             case 0xE6: 
                 cpu_inc(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1628,6 +1781,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_inc(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0xC9:
                 cpu_cmp(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1660,6 +1814,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_cmp(cpu, Indirect_Y);
                 cpu->program_counter += 1;
                 break;
+
             case 0xE0:
                 cpu_cpx(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1672,6 +1827,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_cpx(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
+
             case 0xC0:
                 cpu_cpy(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1684,6 +1840,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_cpy(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
+
             case 0xC6:
                 cpu_dec(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1700,6 +1857,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_dec(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0x4C: 
                 cpu_jmp(cpu, Absolute);
                 cpu->program_counter += 2;
@@ -1708,6 +1866,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_jmp(cpu, Indirect);
                 cpu->program_counter += 2;
                 break;
+
             case 0xCA: cpu_dex(cpu);
                 break;
             case 0x88: cpu_dey(cpu);
@@ -1726,6 +1885,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 break;
             case 0xF8: cpu_sed(&cpu->status);
                 break;
+
             case 0x0A: cpu_asl(cpu, Accumulator);
                 break;
             case 0x06:
@@ -1744,6 +1904,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_asl(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0x4A: cpu_lsr(cpu, Accumulator);
                 break;
             case 0x46:
@@ -1762,6 +1923,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_lsr(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0x2A: cpu_rol(cpu, Accumulator);
                 break;
             case 0x26:
@@ -1780,6 +1942,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_rol(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0x6A:
                 cpu_ror(cpu, Accumulator);
                 break;
@@ -1799,21 +1962,22 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_ror(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
+
             case 0x90:
-                cpu_bcc(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bcc(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0xB0:
-                cpu_bcs(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bcs(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0xF0:
-                cpu_beq(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_beq(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0xD0:
-                cpu_bne(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bne(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0x24:
                 cpu_bit(cpu, Zero_Page);
@@ -1824,24 +1988,23 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu->program_counter += 2;
                 break;
             case 0x30:
-                cpu_bmi(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bmi(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0x10:
-                cpu_bpl(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bpl(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0x50:
-                cpu_bvc(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bvc(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
             case 0x70:
-                cpu_bvs(cpu, Immediate);
-                cpu->program_counter += 1;
+                if (!cpu_bvs(cpu, Immediate))
+                    cpu->program_counter += 1;
                 break;
-            case 0x20:
-                cpu_jsr(cpu);
-                cpu->program_counter += 2;
+
+            case 0x20: cpu_jsr(cpu);
                 break;
             case 0x60: cpu_rts(cpu);
                 break;
@@ -1871,7 +2034,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
             case 0xF4:
                 cpu_dop(cpu, Immediate);
                 cpu->program_counter += 1;
-                break
+                break;
 
             case 0x0C:
             case 0x1C:
