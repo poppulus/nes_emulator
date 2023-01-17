@@ -1060,11 +1060,58 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
 
         switch (opscode)
         {
+            case 0x02:
+            case 0x12:
+            case 0x22:
+            case 0x32:
+            case 0x42:
+            case 0x52:
+            case 0x62:
+            case 0x72:
+            case 0x82:
+            case 0x92:
+            case 0xB2:
+            case 0xD2:
+            case 0xF2:
+                cpu_kil(cpu, 0);
+                break;
+
+            case 0xBB:
+                cpu_lar(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+
+            case 0xA7:
+                cpu_lax(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0xB7:
+                cpu_lax(cpu, Zero_Page_Y);
+                cpu->program_counter += 1;
+                break;
+            case 0xAF:
+                cpu_lax(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0xBF:
+                cpu_lax(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0xA3:
+                cpu_lax(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0xB3:
+                cpu_lax(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+
             case 0x0B:
             case 0x2B:
                 cpu_aac(cpu, Immediate);
                 cpu->program_counter += 1;
                 break;
+                
             case 0x87:
                 cpu_aax(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1106,7 +1153,92 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu->program_counter += 1;
                 break;
 
-            // dcp next
+            case 0xC7:
+                cpu_dcp(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0xD7:
+                cpu_dcp(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0xCF:
+                cpu_dcp(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0xDF:
+                cpu_dcp(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0xDB:
+                cpu_dcp(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0xC3:
+                cpu_dcp(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0xD3:
+                cpu_dcp(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+
+            case 0x27:
+                cpu_rla(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0x37:
+                cpu_rla(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x2F:
+                cpu_rla(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0x3F:
+                cpu_rla(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0x3B:
+                cpu_rla(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0x23:
+                cpu_rla(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x33:
+                cpu_rla(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+
+            case 0x67:
+                cpu_rra(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0x77:
+                cpu_rra(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x6F:
+                cpu_rra(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0x7F:
+                cpu_rra(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0x7B:
+                cpu_rra(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0x63:
+                cpu_rra(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x73:
+                cpu_rra(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
 
             /*  adc start   */
             case 0x69:
@@ -1146,6 +1278,10 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_sbc(cpu, Immediate);
                 cpu->program_counter += 1;
                 break;
+            case 0xEB:
+                cpu_sbc(cpu, Immediate);
+                cpu->program_counter += 1;
+                break;
             case 0xE5:
                 cpu_sbc(cpu, Zero_Page);
                 cpu->program_counter += 1;
@@ -1174,6 +1310,114 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 cpu_sbc(cpu, Indirect_Y);
                 cpu->program_counter += 1;
                 break;
+
+            case 0xE7:
+                cpu_isc(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0xF7:
+                cpu_isc(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0xEF:
+                cpu_isc(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0xFF:
+                cpu_isc(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0xFB:
+                cpu_isc(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0xE3:
+                cpu_isc(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0xF3:
+                cpu_isc(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+
+            case 0x07:
+                cpu_slo(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0x17:
+                cpu_slo(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x0F:
+                cpu_slo(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0x1F:
+                cpu_slo(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0x1B:
+                cpu_slo(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0x03:
+                cpu_slo(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x13:
+                cpu_slo(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+
+            case 0x47:
+                cpu_sre(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                break;
+            case 0x57:
+                cpu_sre(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x4F:
+                cpu_sre(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+            case 0x5F:
+                cpu_sre(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+            case 0x5B:
+                cpu_sre(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+            case 0x43:
+                cpu_sre(cpu, Indirect_X);
+                cpu->program_counter += 1;
+                break;
+            case 0x53:
+                cpu_sre(cpu, Indirect_Y);
+                cpu->program_counter += 1;
+                break;
+            
+            case 0x9E:
+                cpu_sxa(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+
+            case 0x9C:
+                cpu_sya(cpu, Absolute_X);
+                cpu->program_counter += 2;
+                break;
+
+            case 0x8B:
+                cpu_xaa(cpu, Immediate);
+                cpu->program_counter += 1;
+                break;
+
+            case 0x9B:
+                cpu_xas(cpu, Absolute_Y);
+                cpu->program_counter += 2;
+                break;
+
             case 0x29: 
                 cpu_and(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1601,6 +1845,7 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
                 break;
             case 0x60: cpu_rts(cpu);
                 break;
+
             case 0xEA:
             case 0x1A:
             case 0x3A:
@@ -1609,6 +1854,36 @@ static void cpu_interpret(CPU *cpu, unsigned char program[])
             case 0xFA:
                 cpu_nop();
                 break;
+
+            case 0x04:
+            case 0x14:
+            case 0x34:
+            case 0x44:
+            case 0x54:
+            case 0x64:
+            case 0x74:
+            case 0x80:
+            case 0x82:
+            case 0x89:
+            case 0xC2:
+            case 0xD4:
+            case 0xE2:
+            case 0xF4:
+                cpu_dop(cpu, Immediate);
+                cpu->program_counter += 1;
+                break
+
+            case 0x0C:
+            case 0x1C:
+            case 0x3C:
+            case 0x5C:
+            case 0x7C:
+            case 0xDC:
+            case 0xFC:
+                cpu_top(cpu, Absolute);
+                cpu->program_counter += 2;
+                break;
+
             case 0x00: cpu_brk(cpu);
                 break;
         }
