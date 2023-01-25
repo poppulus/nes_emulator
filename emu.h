@@ -310,9 +310,10 @@ static void cpu_reset(CPU *cpu)
     cpu->register_x = 0;
     cpu->register_y = 0;
     cpu->status = 0b100100;
-    cpu->stack_pointer = 0xFF;     //   cpu_mem_read_u16(cpu, 0xFFFC);
-    cpu->program_counter = 0xC000; //   this should be the standard 
-                                   //   testing with nestest.rom for now ...
+    cpu->stack_pointer = 0xFD;     
+    cpu->program_counter = 0xC000; //   cpu_mem_read_u16(cpu, 0xFFFC);
+                                   //   ... should be the standard 
+                                   //   testing with nestest.rom for now
 }
 
 static unsigned short cpu_get_operand_address(CPU *cpu, enum AddressingMode mode)
@@ -732,51 +733,36 @@ static void cpu_and(CPU *cpu, enum AddressingMode mode)
         &cpu->status, cpu->register_a & cpu_mem_read(&cpu->bus, addr));
 }
 
-static int cpu_bcc(CPU *cpu, enum AddressingMode mode)
+static void cpu_bcc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Carry_Flag) == 0)
-    {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-        jmp = 1;
-    }
-
-    return jmp;
 }
 
-static int cpu_bcs(CPU *cpu, enum AddressingMode mode)
+static void cpu_bcs(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Carry_Flag) != 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
-static int cpu_beq(CPU *cpu, enum AddressingMode mode)
+static void cpu_beq(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Zero_Flag) != 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
-static int cpu_bne(CPU *cpu, enum AddressingMode mode)
+static void cpu_bne(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Zero_Flag) == 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
 static void cpu_bit(CPU *cpu, enum AddressingMode mode)
@@ -784,59 +770,50 @@ static void cpu_bit(CPU *cpu, enum AddressingMode mode)
     unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
     unsigned char   mem = cpu_mem_read(&cpu->bus, addr),
-                    b6 = mem | Overflow_Flag,
-                    b7 = mem | Negative_Flag,
-                    and = cpu->register_a & mem;
+                    and = cpu->register_a & mem,
+                    bit6 = mem & Overflow_Flag,
+                    bit7 = mem & Negative_Flag;
 
     if (and == 0) cpu->status = cpu->status | Zero_Flag;
     else cpu->status = cpu->status & 0b11111101;
 
-    cpu->status = cpu->status | b6;
-    cpu->status = cpu->status | b7;
+    if (bit6) cpu->status = cpu->status | Overflow_Flag;
+    else cpu->status = cpu->status & 0b10111111;
+
+    if (bit7) cpu->status = cpu->status | Negative_Flag;
+    else cpu->status = cpu->status & 0b01111111;
 }
 
-static int cpu_bmi(CPU *cpu, enum AddressingMode mode)
+static void cpu_bmi(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Negative_Flag) != 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
-static int cpu_bpl(CPU *cpu, enum AddressingMode mode)
+static void cpu_bpl(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Negative_Flag) == 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
-static int cpu_bvc(CPU *cpu, enum AddressingMode mode)
+static void cpu_bvc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
     
     if ((cpu->status & Overflow_Flag) == 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
-static int cpu_bvs(CPU *cpu, enum AddressingMode mode)
+static void cpu_bvs(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    int jmp = 0;
 
     if ((cpu->status & Overflow_Flag) != 0)
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
-
-    return jmp;
 }
 
 static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
@@ -850,7 +827,7 @@ static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
     else 
         cpu_clc(&cpu->status);
 
-    if (cpu->register_a == mem) 
+    if (cpu->register_a == mem)
         cpu_zero_set(&cpu->status);
     else 
         cpu_zero_clear(&cpu->status);
@@ -979,7 +956,6 @@ static void cpu_jmp(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
     cpu->program_counter = addr;
-    printf("jump to: %d\n", addr);
 }
 
 static void cpu_lda(CPU *cpu, enum AddressingMode mode)
@@ -1249,17 +1225,18 @@ static void cpu_rti(CPU *cpu)
 
 static void cpu_rts(CPU *cpu)
 {
-    cpu->program_counter = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer) - 1;
-    cpu->stack_pointer += 1;
+    cpu->program_counter = cpu_mem_read_u16(cpu, 0x0100 + cpu->stack_pointer) + 1;
+    cpu->stack_pointer += 2;
 }
 
 static void cpu_jsr(CPU *cpu)
 {
     unsigned short addr = cpu_get_operand_address(cpu, Absolute);
 
-    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, addr - 1);
     cpu->stack_pointer -= 1;
-    cpu->program_counter = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
+    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer, cpu->program_counter + 1);
+    cpu->stack_pointer -= 1;
+    cpu->program_counter = addr;
 }
 
 static void cpu_interpret(CPU *cpu)
@@ -1275,11 +1252,19 @@ static void cpu_interpret(CPU *cpu)
                         val2 = cpu_mem_read(&cpu->bus, cpu->program_counter + 2);
 
         printf(
-            "\nPC:%d OP:%d VAL1:%d VAL2:%d\n", 
+            "\nPC:%d OP:%d VAL1:%d VAL2:%d ", 
             cpu->program_counter, 
             opscode, 
             val1, 
             val2);
+
+        printf(
+            "A:%d X:%d Y:%d P:%d SP:%d\n",
+            cpu->register_a,
+            cpu->register_x,
+            cpu->register_y,
+            cpu->status,
+            cpu->stack_pointer);
 
         cpu->program_counter++;
 
@@ -2097,20 +2082,20 @@ static void cpu_interpret(CPU *cpu)
                 break;
 
             case 0x90:
-                if (!cpu_bcc(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bcc(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0xB0:
-                if (!cpu_bcs(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bcs(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0xF0:
-                if (!cpu_beq(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_beq(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0xD0:
-                if (!cpu_bne(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bne(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0x24:
                 cpu_bit(cpu, Zero_Page);
@@ -2121,20 +2106,20 @@ static void cpu_interpret(CPU *cpu)
                 cpu->program_counter += 2;
                 break;
             case 0x30:
-                if (!cpu_bmi(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bmi(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0x10:
-                if (!cpu_bpl(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bpl(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0x50:
-                if (!cpu_bvc(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bvc(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
             case 0x70:
-                if (!cpu_bvs(cpu, Immediate))
-                    cpu->program_counter += 1;
+                cpu_bvs(cpu, Immediate);
+                cpu->program_counter += 1;
                 break;
 
             case 0x20: cpu_jsr(cpu);
@@ -2184,15 +2169,8 @@ static void cpu_interpret(CPU *cpu)
                 break;
         }
 
-        if (test_counter++ > 10) return;
-
-        printf(
-        "A:%d X:%d Y:%d P:%d SP:%d\n",
-        cpu->register_a,
-        cpu->register_x,
-        cpu->register_y,
-        cpu->memory[cpu->stack_pointer],
-        cpu->stack_pointer);
+        if (opscode == 0x60) return;
+        if (++test_counter >= 47) return;
     }
 }
 
@@ -2237,8 +2215,6 @@ static void test_format_mem_access(const char *filename)
     }
 
     cpu_reset(&cpu);
-
-
 
     /*
     bus_mem_write(&cpu.bus, 100, 0x11);
