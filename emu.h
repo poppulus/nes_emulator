@@ -304,12 +304,11 @@ static void cpu_reset(CPU *cpu)
         cpu->bus.cpu_vram[i] = 0;
 
     memcpy(&cpu->memory[0x8000], cpu->bus.rom.prg_rom, cpu->bus.rom.prg_len);
-    //cpu_mem_write_u16(cpu, 0xFFFC, 0x8000);
 
     cpu->register_a = 0;
     cpu->register_x = 0;
     cpu->register_y = 0;
-    cpu->status = 0b100100;
+    cpu->status = 0b00100100;
     cpu->stack_pointer = 0xFD;     
     cpu->program_counter = 0xC000; //   cpu_mem_read_u16(cpu, 0xFFFC);
                                    //   ... should be the standard 
@@ -688,21 +687,22 @@ static void cpu_xas(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_adc(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
-    unsigned char   value = cpu_mem_read(&cpu->bus, addr) + (cpu->status & Carry_Flag),
-                    acc = cpu->register_a,
-                    sum = acc + value;
+    unsigned char   arg = cpu_mem_read(&cpu->bus, addr);
 
-    if ((acc ^ sum) & (value ^ sum) & 0x80)
+    short           sum = cpu->register_a + arg + (cpu->status & Carry_Flag);
+
+    if (~(cpu->register_a ^ arg) & (cpu->register_a ^ sum) & 0x80)
         cpu->status = cpu->status | Overflow_Flag;
     else 
         cpu->status = cpu->status & 0b10111111;
 
-    if (acc <= value) cpu_sec(&cpu->status);
+    cpu->register_a = sum & 0xFF;
+
+    if (sum > 0xFF) cpu_sec(&cpu->status);    //(cpu->register_a >> 8) & 0x01
     else cpu_clc(&cpu->status);
 
-    cpu->register_a = sum;
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
@@ -710,27 +710,28 @@ static void cpu_sbc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-    unsigned char   value = cpu_mem_read(&cpu->bus, addr) - (!(cpu->status & Carry_Flag)),
-                    acc = cpu->register_a,
-                    sum = acc - value;
+    unsigned char   arg = cpu_mem_read(&cpu->bus, addr) ^ 0xFF;
 
-    if (acc >= value) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    short           sum = cpu->register_a + arg + (cpu->status & Carry_Flag);
 
-    if ((acc ^ sum) & (value ^ sum) & 0x80)
+    if (~(cpu->register_a ^ arg) & (cpu->register_a ^ sum) & 0x80)
         cpu->status = cpu->status | Overflow_Flag;
     else 
         cpu->status = cpu->status & 0b10111111;
 
-    cpu->register_a = sum;
+    cpu->register_a = sum & 0xFF;
+
+    if (sum > 0xFF) cpu_sec(&cpu->status);
+    else cpu_clc(&cpu->status);
+
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_and(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    cpu_update_zero_and_negative_flags(
-        &cpu->status, cpu->register_a & cpu_mem_read(&cpu->bus, addr));
+    cpu->register_a &= cpu_mem_read(&cpu->bus, addr);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_bcc(CPU *cpu, enum AddressingMode mode)
@@ -818,7 +819,8 @@ static void cpu_bvs(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
+
     unsigned char   mem = cpu_mem_read(&cpu->bus, addr), 
                     result = cpu->register_a - mem;
 
@@ -833,14 +835,15 @@ static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
         cpu_zero_clear(&cpu->status);
 
     if (result & 0b10000000) 
-        cpu->status = cpu->status | 0b10000000;
+        cpu->status = cpu->status | Negative_Flag;
     else 
         cpu->status = cpu->status & 0b01111111;
 }
 
 static void cpu_cpx(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
+
     unsigned char   mem = cpu_mem_read(&cpu->bus, addr), 
                     result = cpu->register_x - mem;
 
@@ -855,7 +858,7 @@ static void cpu_cpx(CPU *cpu, enum AddressingMode mode)
         cpu_zero_clear(&cpu->status);
 
     if (result & 0b10000000) 
-        cpu->status = cpu->status | 0b10000000;
+        cpu->status = cpu->status | Negative_Flag;
     else 
         cpu->status = cpu->status & 0b01111111;
 }
@@ -863,6 +866,7 @@ static void cpu_cpx(CPU *cpu, enum AddressingMode mode)
 static void cpu_cpy(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+
     unsigned char   mem = cpu_mem_read(&cpu->bus, addr),
                     result = cpu->register_y - mem;
 
@@ -877,7 +881,7 @@ static void cpu_cpy(CPU *cpu, enum AddressingMode mode)
         cpu_zero_clear(&cpu->status);
 
     if (result & 0b10000000) 
-        cpu->status = cpu->status | 0b10000000;
+        cpu->status = cpu->status | Negative_Flag;
     else 
         cpu->status = cpu->status & 0b01111111;
 }
@@ -916,15 +920,15 @@ static void cpu_brk(CPU *cpu)
 static void cpu_eor(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    cpu_update_zero_and_negative_flags(
-        &cpu->status, cpu->register_a ^ cpu_mem_read(&cpu->bus, addr));
+    cpu->register_a ^= cpu_mem_read(&cpu->bus, addr);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_ora(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    cpu_update_zero_and_negative_flags(
-        &cpu->status, cpu->register_a | cpu_mem_read(&cpu->bus, addr));
+    cpu->register_a |= cpu_mem_read(&cpu->bus, addr);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_nop()
@@ -1023,13 +1027,13 @@ static void cpu_sty(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_tsx(CPU *cpu)
 {
-    cpu->register_x = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
-    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
+    cpu->register_x = cpu->stack_pointer;
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_x);
 }
 
 static void cpu_txs(CPU *cpu)
 {
-    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, cpu->register_x);
+    cpu->stack_pointer = cpu->register_x;
 }
 
 static void cpu_pha(CPU *cpu)
@@ -1040,21 +1044,26 @@ static void cpu_pha(CPU *cpu)
 
 static void cpu_php(CPU *cpu)
 {
-    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, cpu->status);
+    unsigned char p = cpu->status;
+    p = p | Break_Command_Flag;
+    p = p | Unused_Flag;
+    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, p);
     cpu->stack_pointer -= 1;
 }
 
 static void cpu_pla(CPU *cpu)
 {
-    cpu->register_a = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
     cpu->stack_pointer += 1;
+    cpu->register_a = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_plp(CPU *cpu)
 {
-    cpu->status = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
     cpu->stack_pointer += 1;
+    cpu->status = Unused_Flag;
+    cpu->status |= cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
+    cpu->status &= 0b11101111;
 }
 
 static void cpu_rol(CPU *cpu, enum AddressingMode mode)
@@ -1215,42 +1224,47 @@ static void cpu_lsr(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_rti(CPU *cpu)
 {
-    unsigned char mem = cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
     // pull status followed by counter
-    cpu->status = mem;
     cpu->stack_pointer += 1;
-    cpu->program_counter = mem;
-    cpu->stack_pointer += 1;
+    cpu->status = Unused_Flag;
+    cpu->status |= cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
+    cpu->stack_pointer += 2;
+    cpu->program_counter = cpu_mem_read_u16(cpu, 0x0100 + cpu->stack_pointer - 1);
 }
 
 static void cpu_rts(CPU *cpu)
 {
-    cpu->program_counter = cpu_mem_read_u16(cpu, 0x0100 + cpu->stack_pointer) + 1;
     cpu->stack_pointer += 2;
+    cpu->program_counter = cpu_mem_read_u16(cpu, 0x0100 + cpu->stack_pointer - 1) + 1;
 }
 
 static void cpu_jsr(CPU *cpu)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, Absolute);
-
-    cpu->stack_pointer -= 1;
-    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer, cpu->program_counter + 1);
-    cpu->stack_pointer -= 1;
-    cpu->program_counter = addr;
+    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer - 1, cpu->program_counter + 1);
+    cpu->stack_pointer -= 2;
+    cpu->program_counter = cpu_get_operand_address(cpu, Absolute);
 }
 
 static void cpu_interpret(CPU *cpu)
 {
     printf("start cpu interpret loop\n");
+
+    FILE *f;
+
+    if (!(f = fopen("mytest.log", "w")))
+    {
+        printf("could not open log file!\n");
+        return;
+    }
     
-    int test_counter = 0;
+    int test_counter = 1;
 
     while (1)
     {
         unsigned char   opscode = cpu_mem_read(&cpu->bus, cpu->program_counter),
                         val1 = cpu_mem_read(&cpu->bus, cpu->program_counter + 1),
                         val2 = cpu_mem_read(&cpu->bus, cpu->program_counter + 2);
-
+        /*
         printf(
             "\nPC:%d OP:%d VAL1:%d VAL2:%d ", 
             cpu->program_counter, 
@@ -1265,6 +1279,18 @@ static void cpu_interpret(CPU *cpu)
             cpu->register_y,
             cpu->status,
             cpu->stack_pointer);
+
+        
+        */
+        // "C799  85 01     STA $01 = FF                    A:00 X:00 Y:00 P:66 SP:FB"
+
+        printf("program counter: %d\n", test_counter);
+
+        fprintf(
+            f, 
+            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X\n",
+            cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
+            cpu->register_y, cpu->status, cpu->stack_pointer);
 
         cpu->program_counter++;
 
@@ -2169,8 +2195,7 @@ static void cpu_interpret(CPU *cpu)
                 break;
         }
 
-        if (opscode == 0x60) return;
-        if (++test_counter >= 47) return;
+        if (++test_counter > 1000) return;
     }
 }
 
