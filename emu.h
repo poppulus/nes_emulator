@@ -334,23 +334,23 @@ static unsigned short cpu_get_operand_address(CPU *cpu, enum AddressingMode mode
             opaddr = (unsigned short)cpu_mem_read(&cpu->bus, cpu->program_counter);
             break;
         case Zero_Page_X:
-            pos = cpu_mem_read(&cpu->bus, cpu->program_counter) + cpu->register_x;
-            opaddr = (unsigned short)pos;
+            pos = cpu_mem_read(&cpu->bus, cpu->program_counter);
+            opaddr = (unsigned short)((pos + cpu->register_x) % 0x100);
             break;
         case Zero_Page_Y:
-            pos = cpu_mem_read(&cpu->bus, cpu->program_counter) + cpu->register_y;
-            opaddr = (unsigned short)pos;
+            pos = cpu_mem_read(&cpu->bus, cpu->program_counter);
+            opaddr = (unsigned short)((pos + cpu->register_y) % 0x100);
             break;
         case Absolute:
             opaddr = cpu_mem_read_u16(cpu, cpu->program_counter);
             break;
         case Absolute_X:
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            opaddr = base + (unsigned short)cpu->register_x;
+            opaddr = (base + (unsigned short)cpu->register_x) % 0x1000;
             break;
         case Absolute_Y:
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            opaddr = base + (unsigned short)cpu->register_y;
+            opaddr = (base + (unsigned short)cpu->register_y) % 0x1000;
             break;
         case Indirect: // only for JMP
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
@@ -364,28 +364,28 @@ static unsigned short cpu_get_operand_address(CPU *cpu, enum AddressingMode mode
             else 
             {
                 lo = cpu_mem_read(&cpu->bus, base);
-                hi = cpu_mem_read(&cpu->bus, base + 1);
+                hi = cpu_mem_read(&cpu->bus, (base + 1) % 0x10000);
                 opaddr = ((unsigned short)hi << 8) | (unsigned short)lo;
             }
             break;
         case Indirect_X:
             base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter);
 
-            unsigned char ptr = base_8 + cpu->register_x;
+            unsigned char ptr = (base_8 + cpu->register_x) % 0x100;
 
             lo = cpu_mem_read(&cpu->bus, (unsigned short)ptr);
-            hi = cpu_mem_read(&cpu->bus, (unsigned short)(ptr + 1));
+            hi = cpu_mem_read(&cpu->bus, (unsigned short)((ptr + 1) % 0x100));
 
             opaddr = ((unsigned short)hi << 8) | (unsigned short)lo;
             break;
         case Indirect_Y:
             base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter);
 
-            lo = cpu_mem_read(&cpu->bus, base_8);
-            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1)));
+            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8);
+            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
 
             unsigned short deref_base   = ((unsigned short)hi << 8) | (unsigned short)lo;
-            unsigned short deref        = deref_base + (unsigned short)cpu->register_y;
+            unsigned short deref        = (deref_base + (unsigned short)cpu->register_y) % 0x10000;
 
             opaddr = deref;
             break;
@@ -413,11 +413,7 @@ static void cpu_aac(CPU *cpu, enum AddressingMode mode)
 static void cpu_aax(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-
-    cpu->register_a &= cpu->register_x;
-    cpu_mem_write(&cpu->bus, addr, cpu->register_a);
-
-    cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read(&cpu->bus, addr));
+    cpu_mem_write(&cpu->bus, addr, cpu->register_a & cpu->register_x);
 }
 
 static void cpu_arr(CPU *cpu, enum AddressingMode mode)
@@ -505,12 +501,26 @@ static void cpu_axs(CPU *cpu, enum AddressingMode mode)
 static void cpu_dcp(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    unsigned char mem = bus_mem_read(&cpu->bus, addr);
 
-    cpu_mem_write(&cpu->bus, addr, mem - 1);
+    cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) - 1);
 
-    if (mem & Carry_Flag) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
+    unsigned char result = cpu->register_a - mem;
+
+    if (cpu->register_a >= mem)
+        cpu_sec(&cpu->status);
+    else 
+        cpu_clc(&cpu->status);
+
+    if (cpu->register_a == mem)
+        cpu_zero_set(&cpu->status);
+    else 
+        cpu_zero_clear(&cpu->status);
+
+    if (result & 0b10000000) 
+        cpu->status = cpu->status | Negative_Flag;
+    else 
+        cpu->status = cpu->status & 0b01111111;
 }
 
 static void cpu_dop(CPU *cpu, enum AddressingMode mode)
@@ -522,21 +532,21 @@ static void cpu_isc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-    unsigned char   value = cpu_mem_read(&cpu->bus, addr) + 1 - (cpu->status & Carry_Flag),
-                    acc = cpu->register_a,
-                    sum = acc + value;
+    cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) + 1);
 
-    // check carry and overflow
-    if ((acc ^ sum) & (value ^ sum) & 0x80)
+    unsigned char arg = cpu_mem_read(&cpu->bus, addr) ^ 0xFF;
+
+    short         sum = cpu->register_a + arg + (cpu->status & Carry_Flag);
+
+    if (~(cpu->register_a ^ arg) & (cpu->register_a ^ sum) & 0x80)
         cpu->status = cpu->status | Overflow_Flag;
     else 
         cpu->status = cpu->status & 0b10111111;
 
-    if (acc >= value) cpu_sec(&cpu->status);
+    if (sum > 0xFF) cpu_sec(&cpu->status);
     else cpu_clc(&cpu->status);
 
-    cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) + 1);
-    cpu->register_a -= cpu_mem_read(&cpu->bus, addr) - (cpu->status & Carry_Flag);
+    cpu->register_a = sum & 0xFF;
 
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
@@ -563,81 +573,106 @@ static void cpu_lax(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-    cpu->register_a = cpu_mem_read(&cpu->bus, addr);
-    cpu->register_x = cpu_mem_read(&cpu->bus, addr);
+    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
 
-    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_x);
+    cpu->register_a = mem;
+    cpu->register_x = mem;
+
+    cpu_update_zero_and_negative_flags(&cpu->status, mem);
 }
 
 static void cpu_rla(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
-    unsigned char   shift = cpu_mem_read(&cpu->bus, addr) << 1, 
+    unsigned char   carry = (cpu->status & Carry_Flag),
+                    old_bit = cpu_mem_read(&cpu->bus, addr),
+                    shift = cpu_mem_read(&cpu->bus, addr) << 1,
                     rotate = cpu_mem_read(&cpu->bus, addr) >> 7;
 
-    cpu_mem_write(&cpu->bus, addr, shift | rotate);
+    cpu_mem_write(&cpu->bus, addr, (shift | rotate));
 
-    unsigned char result = cpu_mem_read(&cpu->bus, addr) & cpu->register_a;
+    if (carry) 
+        cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) | Carry_Flag);
+    else 
+        cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) & 0b11111110);
 
-    if (cpu_mem_read(&cpu->bus, addr) <= result) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    if (old_bit & 0b10000000) 
+        cpu->status = cpu->status | Carry_Flag;
+    else 
+        cpu->status = cpu->status & 0b11111110;
 
-    cpu_update_zero_and_negative_flags(&cpu->status, result);
+    cpu->register_a &= cpu_mem_read(&cpu->bus, addr);
+
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_rra(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
-    unsigned char   mem = cpu_mem_read(&cpu->bus, addr), 
-                    shift = mem >> 1,
-                    rotate = mem << 7,
-                    value = mem + (cpu->status & Carry_Flag),
-                    sum = cpu->register_a + value;
+    unsigned char   old_bit = cpu_mem_read(&cpu->bus, addr),
+                    shift = cpu_mem_read(&cpu->bus, addr) >> 1,
+                    rotate = cpu_mem_read(&cpu->bus, addr) << 7;
 
     cpu_mem_write(&cpu->bus, addr, shift | rotate);
 
-    if (cpu->register_a <= value) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    if (cpu->status & 0b00000001) 
+        cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) | 0b10000000);
+    else 
+        cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) & 0b01111111);
 
-    if ((cpu->register_a ^ value) & (value ^ sum) & 0x80)
+    unsigned char   carry = old_bit & 0b00000001,
+                    arg = cpu_mem_read(&cpu->bus, addr);
+
+    short           sum = cpu->register_a + arg + carry;
+
+    if (~(cpu->register_a ^ arg) & (cpu->register_a ^ sum) & 0x80)
         cpu->status = cpu->status | Overflow_Flag;
     else 
         cpu->status = cpu->status & 0b10111111;
 
-    cpu->register_a += value;
+    if (sum > 0xFF) cpu_sec(&cpu->status);
+    else            cpu_clc(&cpu->status);
+
+    cpu->register_a = sum & 0xFF;
+    
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_slo(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
 
-    cpu_mem_write(&cpu->bus, addr, mem << 1);
+    unsigned char old_bit = cpu_mem_read(&cpu->bus, addr);
 
-    unsigned char result = cpu->register_a | mem;
+    cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) << 1);
 
-    if (mem <= result) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    if ((old_bit & 0b10000000) != 0)
+        cpu->status = cpu->status | Carry_Flag;
+    else 
+        cpu->status = cpu->status & 0b11111110;
 
-    cpu_update_zero_and_negative_flags(&cpu->status, result);
+    cpu->register_a |= cpu_mem_read(&cpu->bus, addr);
+
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_sre(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
+    unsigned char  old_bit = cpu_mem_read(&cpu->bus, addr);
 
-    cpu_mem_write(&cpu->bus, addr, mem >> 1);
+    if ((old_bit & 0b00000001) != 0) 
+        cpu->status = cpu->status | Carry_Flag;
+    else 
+        cpu->status = cpu->status & 0b11111110;
 
-    unsigned char result = mem ^ cpu->register_a;
+    cpu_mem_write(&cpu->bus, addr, (cpu_mem_read(&cpu->bus, addr) >> 1) & 0b01111111);
 
-    if (mem >= result) cpu_sec(&cpu->status);
-    else cpu_clc(&cpu->status);
+    cpu->register_a ^= cpu_mem_read(&cpu->bus, addr);
 
-    cpu_update_zero_and_negative_flags(&cpu->status, result);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
 static void cpu_sxa(CPU *cpu, enum AddressingMode mode)
@@ -700,7 +735,7 @@ static void cpu_adc(CPU *cpu, enum AddressingMode mode)
 
     cpu->register_a = sum & 0xFF;
 
-    if (sum > 0xFF) cpu_sec(&cpu->status);    //(cpu->register_a >> 8) & 0x01
+    if (sum > 0xFF) cpu_sec(&cpu->status); //(cpu->register_a >> 8) & 0x01
     else cpu_clc(&cpu->status);
 
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
@@ -708,7 +743,7 @@ static void cpu_adc(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_sbc(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
     unsigned char   arg = cpu_mem_read(&cpu->bus, addr) ^ 0xFF;
 
@@ -889,9 +924,8 @@ static void cpu_cpy(CPU *cpu, enum AddressingMode mode)
 static void cpu_dec(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
-    cpu_mem_write(&cpu->bus, addr, mem - 1);
-    cpu_update_zero_and_negative_flags(&cpu->status, mem);
+    cpu_mem_write(&cpu->bus, addr, cpu_mem_read_u16(cpu, addr) - 1);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read_u16(cpu, addr));
 }
 
 static void cpu_dex(CPU *cpu)
@@ -909,11 +943,11 @@ static void cpu_dey(CPU *cpu)
 static void cpu_brk(CPU *cpu)
 {
     // fix this(?)
-    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, cpu->program_counter);
+    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer, cpu->program_counter);
     cpu->stack_pointer -= 1;
-    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, cpu->status);
+    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer, cpu->status);
     cpu->stack_pointer -= 1;
-    cpu->program_counter = cpu_mem_read(&cpu->bus, 0xFFFE);
+    cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFE);
     cpu->status = cpu->status | Break_Command_Flag;
 }
 
@@ -927,7 +961,11 @@ static void cpu_eor(CPU *cpu, enum AddressingMode mode)
 static void cpu_ora(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    printf("ORA - ADDR:%X\n", addr);
+    printf("ORA - M:%X\n", cpu_mem_read(&cpu->bus, addr));
+    printf("ORA - A:%X\n", cpu->register_a);
     cpu->register_a |= cpu_mem_read(&cpu->bus, addr);
+    printf("ORA - A after:%X\n", cpu->register_a);
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
@@ -939,9 +977,8 @@ static void cpu_nop()
 static void cpu_inc(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    unsigned char mem = cpu_mem_read(&cpu->bus, addr);
-    cpu_mem_write(&cpu->bus, addr, mem + 1);
-    cpu_update_zero_and_negative_flags(&cpu->status, mem);
+    cpu_mem_write(&cpu->bus, addr, cpu_mem_read_u16(cpu, addr) + 1);
+    cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read_u16(cpu, addr));
 }
 
 static void cpu_inx(CPU *cpu)
@@ -965,7 +1002,11 @@ static void cpu_jmp(CPU *cpu, enum AddressingMode mode)
 static void cpu_lda(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+    printf("LDA - M addr:%X\n", addr);
+    printf("LDA - M bef:%X\n", cpu_mem_read(&cpu->bus, addr));
+    printf("LDA - A bef:%X\n", cpu->register_a);
     cpu->register_a = cpu_mem_read(&cpu->bus, addr);
+    printf("LDA - A aft:%X\n", cpu->register_a);
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
@@ -1070,12 +1111,15 @@ static void cpu_rol(CPU *cpu, enum AddressingMode mode)
 {
     if (mode == Accumulator)
     {
-        unsigned char   old_bit = cpu->register_a,
+        unsigned char   carry = (cpu->status & Carry_Flag),
+                        old_bit = cpu->register_a,
                         shift = cpu->register_a << 1,
                         rotate = cpu->register_a >> 7;
 
         cpu->register_a = shift | rotate;
-        cpu->register_a = cpu->register_a | (cpu->status | 0b00000001);
+
+        if (carry)  cpu->register_a |= Carry_Flag;
+        else        cpu->register_a &= 0b11111110;
 
         if (old_bit & 0b10000000) 
             cpu->status = cpu->status | Carry_Flag;
@@ -1086,22 +1130,26 @@ static void cpu_rol(CPU *cpu, enum AddressingMode mode)
     }
     else
     {
-        unsigned short addr = cpu_get_operand_address(cpu, mode);
+        unsigned short  addr = cpu_get_operand_address(cpu, mode);
 
-        unsigned char   mem = cpu_mem_read(&cpu->bus, addr),
-                        old_bit = mem,
-                        shift = mem << 1,
-                        rotate = mem >> 7;
+        unsigned char   carry = (cpu->status & Carry_Flag),
+                        old_bit = cpu_mem_read(&cpu->bus, addr),
+                        shift = cpu_mem_read(&cpu->bus, addr) << 1,
+                        rotate = cpu_mem_read(&cpu->bus, addr) >> 7;
 
         cpu_mem_write(&cpu->bus, addr, shift | rotate);
-        cpu_mem_write(&cpu->bus, addr, mem | (cpu->status | 0b00000001));
+
+        if (carry) 
+            cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) | Carry_Flag);
+        else 
+            cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) & 0b11111110);
 
         if (old_bit & 0b10000000) 
             cpu->status = cpu->status | Carry_Flag;
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(&cpu->status, mem);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read(&cpu->bus, addr));
     }
 }
 
@@ -1131,24 +1179,23 @@ static void cpu_ror(CPU *cpu, enum AddressingMode mode)
     {
         unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-        unsigned char   mem = cpu_mem_read(&cpu->bus, addr),
-                        old_bit = mem,
-                        shift = mem >> 1,
-                        rotate = mem << 7;
+        unsigned char   old_bit = cpu_mem_read(&cpu->bus, addr),
+                        shift = cpu_mem_read(&cpu->bus, addr) >> 1,
+                        rotate = cpu_mem_read(&cpu->bus, addr) << 7;
 
         cpu_mem_write(&cpu->bus, addr, shift | rotate);
 
         if ((cpu->status & 0b00000001) != 0) 
-            cpu_mem_write(&cpu->bus, addr, mem | 0b10000000);
+            cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) | 0b10000000);
         else 
-            cpu_mem_write(&cpu->bus, addr, mem & 0b01111111);
+            cpu_mem_write(&cpu->bus, addr, cpu_mem_read(&cpu->bus, addr) & 0b01111111);
 
         if (old_bit & 0b00000001) 
             cpu->status = cpu->status | Carry_Flag;
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(&cpu->status, mem);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read(&cpu->bus, addr));
     }
 }
 
@@ -1159,12 +1206,13 @@ static void cpu_asl(CPU *cpu, enum AddressingMode mode)
         unsigned char old_bit = cpu->register_a;
 
         cpu->register_a <<= 1;
-        cpu->register_a = cpu->register_a & 0b11111110;
 
         if ((old_bit & 0b10000000) != 0)
-            cpu->status = cpu->status | 0b10000000;
+            cpu->status = cpu->status | Carry_Flag;
         else 
-            cpu->status = cpu->status & 0b01111111;
+            cpu->status = cpu->status & 0b11111110;
+
+        printf("ASL A - old:%d new:%d C:%d\n", old_bit, cpu->register_a, cpu->status & Carry_Flag);
 
         cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
@@ -1172,18 +1220,16 @@ static void cpu_asl(CPU *cpu, enum AddressingMode mode)
     {
         unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-        unsigned char   mem = cpu_mem_read(&cpu->bus, addr), 
-                        old_bit = mem;
+        unsigned char   old_bit = cpu_mem_read_u16(cpu, addr);
 
-        cpu_mem_write(&cpu->bus, addr, mem << 1);
-        cpu_mem_write(&cpu->bus, addr, mem & 0b11111110);
+        cpu_mem_write(&cpu->bus, addr, cpu_mem_read_u16(cpu, addr) << 1);
 
         if ((old_bit & 0b10000000) != 0)
-            cpu->status = cpu->status | 0b10000000;
+            cpu->status = cpu->status | Carry_Flag;
         else 
-            cpu->status = cpu->status & 0b01111111;
+            cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(&cpu->status, mem);
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read_u16(cpu, addr));
     }
 }
 
@@ -1197,7 +1243,7 @@ static void cpu_lsr(CPU *cpu, enum AddressingMode mode)
         cpu->register_a = cpu->register_a & 0b01111111;
 
         if ((old_bit & 0b00000001) != 0) 
-            cpu->status = cpu->status | 0b00000001;
+            cpu->status = cpu->status | Carry_Flag;
         else 
             cpu->status = cpu->status & 0b11111110;
 
@@ -1207,18 +1253,16 @@ static void cpu_lsr(CPU *cpu, enum AddressingMode mode)
     {
         unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-        unsigned char   mem = cpu_mem_read(&cpu->bus, addr), 
-                        old_bit = mem;
-
-        cpu_mem_write(&cpu->bus, addr, mem >> 1);
-        cpu_mem_write(&cpu->bus, addr, mem & 0b01111111);
+        unsigned char  old_bit = cpu_mem_read(&cpu->bus, addr);
 
         if ((old_bit & 0b00000001) != 0) 
-            cpu->status = cpu->status | 0b00000001;
+            cpu->status = cpu->status | Carry_Flag;
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        cpu_update_zero_and_negative_flags(&cpu->status, mem);
+        cpu_mem_write(&cpu->bus, addr, (cpu_mem_read(&cpu->bus, addr) >> 1) & 0b01111111);
+
+        cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read(&cpu->bus, addr));
     }
 }
 
@@ -1360,11 +1404,11 @@ static void cpu_interpret(CPU *cpu)
                 break;
             case 0xAC:
                 cpu_ldy(cpu, Absolute); 
-                cpu->program_counter += 1;
+                cpu->program_counter += 2;
                 break;
             case 0xBC:
                 cpu_ldy(cpu, Absolute_X); 
-                cpu->program_counter += 1;
+                cpu->program_counter += 2;
                 break;
 
             case 0xBB:
@@ -1419,6 +1463,7 @@ static void cpu_interpret(CPU *cpu)
                 cpu_aax(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
+
             case 0x6B:
                 cpu_arr(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -1774,6 +1819,7 @@ static void cpu_interpret(CPU *cpu)
                 cpu_eor(cpu, Indirect_Y);
                 cpu->program_counter += 1;
                 break;
+
             case 0x09:
                 cpu_ora(cpu, Immediate);
                 cpu->program_counter += 1;
@@ -2063,7 +2109,7 @@ static void cpu_interpret(CPU *cpu)
                 cpu_lsr(cpu, Absolute);
                 cpu->program_counter += 2;
                 break;
-            case 0x5A:
+            case 0x5E:
                 cpu_lsr(cpu, Absolute_X);
                 cpu->program_counter += 2;
                 break;
@@ -2195,7 +2241,7 @@ static void cpu_interpret(CPU *cpu)
                 break;
         }
 
-        if (++test_counter > 1000) return;
+        if (++test_counter > 8991) return;
     }
 }
 
