@@ -2,6 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 
+#define bool unsigned char
+#define true 1
+#define false 0
+
 #define PRG_ROM_PAGE_SIZE   0x4000
 #define CHR_ROM_PAGE_SIZE   0x2000
 
@@ -46,6 +50,39 @@ enum AddressingMode
     None_Addressing
 };
 
+enum ControlRegister
+{
+    NAMETABLE1                  = 0b00000001,
+    NAMETABLE2                  = 0b00000010,
+    VRAM_ADD_INCREMENT          = 0b00000100,
+    SPRITE_PATTERN_ADDR         = 0b00001000,
+    BACKGROUND_PATTERN_ADDR     = 0b00010000,
+    SPRITE_SIZE                 = 0b00100000,
+    MASTER_SLAVE_SELECT         = 0b01000000,
+    GENERATE_NMI                = 0b10000000,
+};
+
+typedef struct AddrRegister
+{
+    // high byte first, low second
+    unsigned char value[2];
+    bool hi_ptr;
+} AddrRegister;
+
+typedef struct PPU
+{
+    unsigned char   *chr_rom,
+                    palette_table[32],
+                    vram[2048],
+                    oam_data[256],
+                    internal_data_buf;
+
+    enum Mirroring mirroring;
+    enum ControlRegister ctrl;
+
+    AddrRegister addr;
+} PPU;
+
 typedef struct Rom
 {
     unsigned char   *prg_rom,
@@ -61,6 +98,7 @@ typedef struct Bus
 {
     unsigned char cpu_vram[2048];
     Rom rom;
+    PPU ppu;
 } Bus;
 
 typedef struct CPU
@@ -83,6 +121,140 @@ typedef struct Emulator
     CPU cpu;
 } Emulator;
 
+static unsigned char vram_addr_increment(enum ControlRegister ctrl)
+{
+    if (ctrl & VRAM_ADD_INCREMENT)  return 1;
+    else                            return 32;
+}
+
+static void addr_reset(AddrRegister *addr)
+{
+    addr->value[0] = 0;
+    addr->value[1] = 0;
+    addr->hi_ptr = true;
+}
+
+static void addr_set(AddrRegister *addr, unsigned short data)
+{
+    addr->value[0] = (unsigned char)(data >> 8);
+    addr->value[1] = (unsigned char)(data & 0xFF);
+}
+
+static unsigned short addr_get(AddrRegister *addr)
+{
+    return (unsigned short)(addr->value[0] << 8) | (unsigned short)addr->value[1];
+}
+
+static void addr_update(AddrRegister *addr, unsigned char data)
+{
+    if (addr->hi_ptr)   addr->value[0] = data;
+    else                addr->value[1] = data;
+    
+    if (addr_get(addr) > 0x3FFF)
+        addr_set(addr, addr_get(addr) & 0b11111111111111);
+    
+    addr->hi_ptr = !addr->hi_ptr;
+}
+
+static void addr_reset_latch(AddrRegister *addr)
+{
+    addr->hi_ptr = true;
+}
+
+static void addr_increment(AddrRegister *addr, unsigned char inc)
+{
+    unsigned char lo = addr->value[1];
+
+    addr->value[1] = (addr->value[1] + inc) % 0x100;
+
+    if (lo > addr->value[1])
+        addr->value[0] = (addr->value[0] + 1) % 0x100;
+
+    if (addr_get(addr) > 0x3FFF)
+        addr_set(addr, addr_get(addr) & 0b11111111111111);
+}
+
+static void ppu_load(PPU *ppu, unsigned char chr_rom, enum Mirroring mirroring)
+{
+    ppu->chr_rom = chr_rom;
+    ppu->mirroring = mirroring;
+
+    for (int i = 0; i < 2048; i++)
+        ppu->vram[i] = 0;
+    
+    for (int i = 0; i < 256; i++)
+        ppu->oam_data[i] = 0;
+
+    for (int i = 0; i < 32; i++)
+        ppu->palette_table[i] = 0;
+}
+
+static void ppu_write_to_ppu_addr(PPU *ppu, unsigned char data)
+{
+    addr_update(&ppu->addr, data);
+}
+
+static void ppu_write_to_ctrl(PPU *ppu, unsigned char data)
+{
+    ppu->ctrl = data;
+}
+
+static void ppu_increment_vram_addr(PPU *ppu)
+{
+    addr_increment(&ppu->addr, vram_addr_increment(ppu->ctrl));
+}
+
+static unsigned short ppu_mirror_vram_addr(PPU *ppu, unsigned short addr)
+{
+    unsigned short  mirrored_vram = addr & 0b10111111111111,
+                    vram_index = mirrored_vram - 0x2000,
+                    name_table = vram_index / 0x0400;
+
+    unsigned short value = vram_index;
+
+    switch (ppu->mirroring)
+    {
+        case VERTICAL:
+            if (name_table == 2 || name_table == 3)
+                value = vram_index - 0x0800;
+            break;
+        case HORIZONTAL:
+            if (name_table == 1 || name_table == 2) value = vram_index - 0x0400;
+            else if (name_table == 3) value = vram_index - 0x0800;
+            break;
+    }
+
+    return value;
+}
+
+static unsigned char ppu_read_data(PPU *ppu)
+{
+    unsigned short addr = addr_get(&ppu->addr);
+    unsigned char data = 0;
+
+    ppu_increment_vram_addr(ppu);
+
+    switch (addr)
+    {
+        case    0       ... 0x1FFF:
+            data = ppu->internal_data_buf;
+            ppu->internal_data_buf = ppu->chr_rom[addr];
+            break;
+        case    0x2000  ... 0x2FFF:
+            data = ppu->internal_data_buf;
+            ppu->internal_data_buf = ppu->vram[ppu_mirror_vram_addr(addr)];
+            break;
+        case    0x3000  ... 0x3EFF:
+            break;
+        case    0x3f00  ... 0x3FFF:
+            data = ppu->palette_table[addr - 0x3F00];
+            break;
+        default:
+            break;
+    }
+
+    return data;
+}
 
 static int rom_load(Rom *rom, unsigned char data[])
 {
@@ -165,13 +337,25 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
         case RAM ... RAM_MIRRORS_END:
             mem_addr = bus->cpu_vram[addr & 0b0000011111111111];
             break;
-        case PPU_REGISTERS ... PPU_REGISTERS_END:
-            //mem_addr = bus->cpu_vram[addr & 0b0010000000000111];
+        case PPU_REGISTERS:
+        case 0x2001:
+        case 0x2003:
+        case 0x2005:
+        case 0x2006:
+        case 0x4014:
+            printf("attempt to read from write-only PPU address:%X\n", addr);
+            break;
+        case 0x2007:
+            mem_addr = ppu_read_data(&bus->ppu);
+            break;
+        case 0x2008 ... PPU_REGISTERS_END:
+            mem_addr = bus_mem_read(bus, addr & 0b0010000000000111);
             break;
         case 0x8000 ... 0xFFFF:
             mem_addr = rom_read_prg_rom(bus, addr);
             break;
         default: 
+            printf("ignoring memory access:%X\n", addr);
             break;
     }
 
@@ -185,13 +369,24 @@ static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
         case RAM ... RAM_MIRRORS_END:
             bus->cpu_vram[addr & 0b11111111111] = data;
             break;
-        case PPU_REGISTERS ... PPU_REGISTERS_END:
-            //bus->cpu_vram[addr & 0b0010000000000111] = data;
+        case PPU_REGISTERS:
+            ppu_write_to_ctrl(&bus->ppu, data);
+            break;
+        case 0x2006:
+            ppu_write_to_ppu_addr(&bus->ppu, data);
+            break;
+        case 0x2007:
+            
+            break;
+        case 0x2008 ... PPU_REGISTERS_END:
+            bus_mem_write(bus, addr & 0b0010000000000111, data);
             break;
         case 0x8000 ... 0xFFFF:
             printf("Attempt to write to cartridge ROM space!\n");
             break;
-        default: break;
+        default: 
+            printf("ignoring memory write-access:%X\n", addr);
+            break;
     }
 }
 
