@@ -1053,6 +1053,7 @@ static void cpu_lax(CPU *cpu, enum AddressingMode mode)
             unsigned short base = cpu_get_operand_address(cpu, Absolute);
             if ((addr >> 8) != (base >> 8))
                 cpu->cycles += 1;
+            break;
         case Indirect_Y:
             unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
                             lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
@@ -1343,13 +1344,13 @@ static void cpu_bcc(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Carry_Flag) == 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
 
-        unsigned short new_addr = cpu->program_counter + 1;
-
-        if (((new_addr + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1360,13 +1361,13 @@ static void cpu_bcs(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Carry_Flag) != 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
 
-        unsigned short new = cpu->program_counter + 1;
-
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1377,16 +1378,14 @@ static void cpu_beq(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Zero_Flag) != 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
 
-        unsigned short new = cpu->program_counter + 1;
-
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
-
-        printf("BEQ new:%X old:%X \n", new, addr);
     }
 }
 
@@ -1396,13 +1395,13 @@ static void cpu_bne(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Zero_Flag) == 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
 
-        unsigned short new = cpu->program_counter + 1;
-
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1432,13 +1431,13 @@ static void cpu_bmi(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Negative_Flag) != 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
-        
-        unsigned short new = cpu->program_counter + 1;
 
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1449,13 +1448,13 @@ static void cpu_bpl(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Negative_Flag) == 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
-        
-        unsigned short new = cpu->program_counter + 1;
 
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1466,13 +1465,13 @@ static void cpu_bvc(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Overflow_Flag) == 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
-        
-        unsigned short new = cpu->program_counter + 1;
 
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1483,13 +1482,13 @@ static void cpu_bvs(CPU *cpu, enum AddressingMode mode)
 
     if ((cpu->status & Overflow_Flag) != 0)
     {
+        unsigned short old = cpu->program_counter + 1;
+
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
 
         cpu->cycles += 1;
-        
-        unsigned short new = cpu->program_counter + 1;
 
-        if (((new + 1) >> 8) < (addr >> 8))
+        if ((old >> 8) != ((cpu->program_counter + 1) >> 8))
             cpu->cycles += 1;
     }
 }
@@ -1761,10 +1760,10 @@ static void cpu_ldy(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
 
-    if (mode == Absolute_Y)
+    if (mode == Absolute_X)
     {
         unsigned short base = cpu_get_operand_address(cpu, Absolute);
-        if ((addr >> 8) != (base >> 8))
+        if ((base >> 8) != (addr >> 8))
             cpu->cycles += 1;
     }
 
@@ -3266,7 +3265,7 @@ static void cpu_interpret(CPU *cpu)
         //if (program_counter_state == cpu->program_counter)
         //    cpu->program_counter += (unsigned short)opscode - 1;
 
-        if (++test_counter > 3500) return;
+        if (++test_counter > 8991) return;
     }
 }
 
