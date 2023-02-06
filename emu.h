@@ -164,12 +164,13 @@ typedef struct CPU
                     register_x, 
                     register_y, 
                     status,
-                    stack_pointer,
-                    cycles;
+                    stack_pointer;
 
     unsigned char   memory[0xFFFF];
 
     unsigned short program_counter;
+
+    unsigned int cycles;
 
     Bus bus;
 } CPU;
@@ -815,11 +816,11 @@ static unsigned short cpu_get_operand_address(CPU *cpu, enum AddressingMode mode
             break;
         case Absolute_X:
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            opaddr = (base + (unsigned short)cpu->register_x) % 0x1000;
+            opaddr = (base + (unsigned short)cpu->register_x) % 0x10000;
             break;
         case Absolute_Y:
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            opaddr = (base + (unsigned short)cpu->register_y) % 0x1000;
+            opaddr = (base + (unsigned short)cpu->register_y) % 0x10000;
             break;
         case Indirect: // only for JMP
             base = cpu_mem_read_u16(cpu, cpu->program_counter);
@@ -873,7 +874,7 @@ static void cpu_aac(CPU *cpu, enum AddressingMode mode)
 
     cpu->register_a &= cpu_mem_read(&cpu->bus, addr);
 
-    if (cpu->register_a & Negative_Flag) cpu_sec(&cpu->status);
+    if (cpu->register_a & 0b10000000) cpu_sec(&cpu->status);
     else cpu_clc(&cpu->status);
 
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
@@ -1027,13 +1028,17 @@ static void cpu_kil(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_lar(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short addr = cpu_get_operand_address(cpu, mode);
+    unsigned short  addr = cpu_get_operand_address(cpu, mode),
+                    base = cpu_get_operand_address(cpu, Absolute);
+
+    if ((addr >> 8) < (base >> 8))
+        cpu->cycles += 1;
 
     unsigned char and = cpu_mem_read(&cpu->bus, addr) & cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
 
     cpu->register_a = and;
     cpu->register_x = and;
-    cpu_mem_write(&cpu->bus, addr, and);
+    cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, and);
     
     cpu_update_zero_and_negative_flags(&cpu->status, cpu_mem_read(&cpu->bus, addr));
 }
@@ -1041,6 +1046,26 @@ static void cpu_lar(CPU *cpu, enum AddressingMode mode)
 static void cpu_lax(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
+
+    switch (mode)
+    {
+        case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+        case Indirect_Y:
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
+                cpu->cycles += 1;
+            break;
+        default: 
+            break;
+    }
 
     unsigned char mem = cpu_mem_read(&cpu->bus, addr);
 
@@ -1160,7 +1185,14 @@ static void cpu_sya(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_top(CPU *cpu, enum AddressingMode mode)
 {
-    // jump over 2 extra bytes
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
+
+    if (mode != Absolute)
+    {
+        unsigned short base = cpu_get_operand_address(cpu, Absolute);
+        if ((addr >> 8) != (base >> 8))
+            cpu->cycles += 1;
+    }
 }
 
 static void cpu_xaa(CPU *cpu, enum AddressingMode mode)
@@ -1197,9 +1229,18 @@ static void cpu_adc(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1231,9 +1272,18 @@ static void cpu_sbc(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1265,9 +1315,18 @@ static void cpu_and(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1280,61 +1339,71 @@ static void cpu_and(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_bcc(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Carry_Flag) == 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+
+        unsigned short new_addr = cpu->program_counter + 1;
+
+        if (((new_addr + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
 static void cpu_bcs(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Carry_Flag) != 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
 static void cpu_beq(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Zero_Flag) != 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
+
+        printf("BEQ new:%X old:%X \n", new, addr);
     }
 }
 
 static void cpu_bne(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Zero_Flag) == 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
@@ -1359,61 +1428,69 @@ static void cpu_bit(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_bmi(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Negative_Flag) != 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+        
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
 static void cpu_bpl(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Negative_Flag) == 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+        
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
 static void cpu_bvc(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Overflow_Flag) == 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+        
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
 static void cpu_bvs(CPU *cpu, enum AddressingMode mode)
 {
-    unsigned short  addr = cpu_get_operand_address(cpu, mode),
-                    base = cpu_mem_read_u16(cpu, cpu->program_counter);
-
-    if ((base >> 8) != (addr >> 8))
-        cpu->cycles += 2;
+    unsigned short addr = cpu_get_operand_address(cpu, mode);
 
     if ((cpu->status & Overflow_Flag) != 0)
     {
         cpu->program_counter += (char)cpu_mem_read(&cpu->bus, addr);
+
         cpu->cycles += 1;
+        
+        unsigned short new = cpu->program_counter + 1;
+
+        if (((new + 1) >> 8) < (addr >> 8))
+            cpu->cycles += 1;
     }
 }
 
@@ -1428,9 +1505,18 @@ static void cpu_cmp(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1537,9 +1623,18 @@ static void cpu_eor(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1558,9 +1653,21 @@ static void cpu_ora(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+            printf("ORA new:%X old:%X\n", addr >> 8, base >> 8);
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            printf("ORA new:%X old:%X\n", addr >> 8, deref >> 8);
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1571,7 +1678,7 @@ static void cpu_ora(CPU *cpu, enum AddressingMode mode)
     cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
 }
 
-static void cpu_nop(CPU *cpu, enum AddressingMode mode)
+static void cpu_nop(CPU *cpu)
 {
 
 }
@@ -1609,9 +1716,22 @@ static void cpu_lda(CPU *cpu, enum AddressingMode mode)
     {
         case Absolute_X:
         case Absolute_Y:
+            unsigned short base = cpu_get_operand_address(cpu, Absolute);
+            if ((addr >> 8) != (base >> 8))
+                cpu->cycles += 1;
+
+            printf("LDA IND Y - new:%X old:%X\n", addr >> 8, base >> 8);
+            break;
         case Indirect_Y:
-            unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-            if ((base >> 8) != (addr >> 8))
+            unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                            lo = cpu_mem_read(&cpu->bus, (unsigned short)base_8),
+                            hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
+
+            unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
+
+            printf("LDA IND Y - new:%X old:%X\n", addr >> 8, deref >> 8);
+
+            if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
             break;
         default: 
@@ -1628,8 +1748,8 @@ static void cpu_ldx(CPU *cpu, enum AddressingMode mode)
 
     if (mode == Absolute_Y)
     {
-        unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-        if ((base >> 8) != (addr >> 8))
+        unsigned short base = cpu_get_operand_address(cpu, Absolute);
+        if ((addr >> 8) != (base >> 8))
             cpu->cycles += 1;
     }
 
@@ -1643,8 +1763,8 @@ static void cpu_ldy(CPU *cpu, enum AddressingMode mode)
 
     if (mode == Absolute_Y)
     {
-        unsigned short base = cpu_mem_read_u16(cpu, cpu->program_counter);
-        if ((base >> 8) != (addr >> 8))
+        unsigned short base = cpu_get_operand_address(cpu, Absolute);
+        if ((addr >> 8) != (base >> 8))
             cpu->cycles += 1;
     }
 
@@ -2078,166 +2198,205 @@ static void cpu_interpret(CPU *cpu)
             case 0xBB:
                 cpu_lar(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 4;
                 break;
 
             case 0xA7:
                 cpu_lax(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 3;
                 break;
             case 0xB7:
                 cpu_lax(cpu, Zero_Page_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 4;
                 break;
             case 0xAF:
                 cpu_lax(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 4;
                 break;
             case 0xBF:
                 cpu_lax(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 4;
                 break;
             case 0xA3:
                 cpu_lax(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0xB3:
                 cpu_lax(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
 
             case 0x0B:
             case 0x2B:
                 cpu_aac(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
                 
             case 0x87:
                 cpu_aax(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 3;
                 break;
             case 0x97:
                 cpu_aax(cpu, Zero_Page_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 4;
                 break;
             case 0x83:
                 cpu_aax(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 4;
                 break;
             case 0x8F:
                 cpu_aax(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
 
             case 0x6B:
                 cpu_arr(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
             case 0x4B:
                 cpu_asr(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
             case 0xAB:
                 cpu_atx(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
             case 0x93:
                 cpu_axa(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0x9F:
-                cpu_axa(cpu, Absolute);
+                cpu_axa(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 5;
                 break;
             case 0xCB:
                 cpu_axs(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
 
             case 0xC7:
                 cpu_dcp(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0xD7:
                 cpu_dcp(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0xCF:
                 cpu_dcp(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0xDF:
                 cpu_dcp(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0xDB:
                 cpu_dcp(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0xC3:
                 cpu_dcp(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0xD3:
                 cpu_dcp(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
 
             case 0x27:
                 cpu_rla(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0x37:
                 cpu_rla(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0x2F:
                 cpu_rla(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0x3F:
                 cpu_rla(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x3B:
                 cpu_rla(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x23:
                 cpu_rla(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0x33:
                 cpu_rla(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
 
             case 0x67:
                 cpu_rra(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0x77:
                 cpu_rra(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0x6F:
                 cpu_rra(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0x7F:
                 cpu_rra(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x7B:
                 cpu_rra(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x63:
                 cpu_rra(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0x73:
                 cpu_rra(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
 
             /*  adc start   */
@@ -2332,108 +2491,133 @@ static void cpu_interpret(CPU *cpu)
             case 0xE7:
                 cpu_isc(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0xF7:
                 cpu_isc(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0xEF:
                 cpu_isc(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0xFF:
                 cpu_isc(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0xFB:
                 cpu_isc(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0xE3:
                 cpu_isc(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0xF3:
                 cpu_isc(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
 
             case 0x07:
                 cpu_slo(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0x17:
                 cpu_slo(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0x0F:
                 cpu_slo(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0x1F:
                 cpu_slo(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x1B:
                 cpu_slo(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x03:
                 cpu_slo(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0x13:
                 cpu_slo(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
 
             case 0x47:
                 cpu_sre(cpu, Zero_Page);
                 cpu->program_counter += 1;
+                cpu->cycles += 5;
                 break;
             case 0x57:
                 cpu_sre(cpu, Zero_Page_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 6;
                 break;
             case 0x4F:
                 cpu_sre(cpu, Absolute);
                 cpu->program_counter += 2;
+                cpu->cycles += 6;
                 break;
             case 0x5F:
                 cpu_sre(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x5B:
                 cpu_sre(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 7;
                 break;
             case 0x43:
                 cpu_sre(cpu, Indirect_X);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             case 0x53:
                 cpu_sre(cpu, Indirect_Y);
                 cpu->program_counter += 1;
+                cpu->cycles += 8;
                 break;
             
             case 0x9E:
                 cpu_sxa(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 5;
                 break;
 
             case 0x9C:
                 cpu_sya(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 5;
                 break;
 
             case 0x8B:
                 cpu_xaa(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
                 break;
 
             case 0x9B:
                 cpu_xas(cpu, Absolute_Y);
                 cpu->program_counter += 2;
+                cpu->cycles += 5;
                 break;
 
             case 0x29: 
@@ -3020,40 +3204,55 @@ static void cpu_interpret(CPU *cpu)
             case 0xEA:
             case 0x1A:
             case 0x3A:
+            case 0x5A:
             case 0x7A:
             case 0xDA:
             case 0xFA:
-                cpu_nop(cpu, 1);
+                cpu_nop(cpu);
                 cpu->cycles += 2;
                 break;
 
-            case 0x04:
-            case 0x14:
-            case 0x34:
-            case 0x44:
-            case 0x54:
-            case 0x64:
-            case 0x74:
             case 0x80:
             case 0x82:
             case 0x89:
             case 0xC2:
-            case 0xD4:
             case 0xE2:
-            case 0xF4:
                 cpu_dop(cpu, Immediate);
                 cpu->program_counter += 1;
+                cpu->cycles += 2;
+                break;
+            case 0x04:
+            case 0x44:
+            case 0x64:
+                cpu_dop(cpu, Zero_Page);
+                cpu->program_counter += 1;
+                cpu->cycles += 3;
+                break;
+            case 0x14:
+            case 0x34:
+            case 0x54:
+            case 0x74:
+            case 0xD4:
+            case 0xF4:
+                cpu_dop(cpu, Zero_Page_X);
+                cpu->program_counter += 1;
+                cpu->cycles += 4;
                 break;
 
             case 0x0C:
+                cpu_top(cpu, Absolute);
+                cpu->program_counter += 2;
+                cpu->cycles += 4;
+                break;
             case 0x1C:
             case 0x3C:
             case 0x5C:
             case 0x7C:
             case 0xDC:
             case 0xFC:
-                cpu_top(cpu, Absolute);
+                cpu_top(cpu, Absolute_X);
                 cpu->program_counter += 2;
+                cpu->cycles += 4;
                 break;
 
             case 0x00: 
@@ -3067,7 +3266,7 @@ static void cpu_interpret(CPU *cpu)
         //if (program_counter_state == cpu->program_counter)
         //    cpu->program_counter += (unsigned short)opscode - 1;
 
-        if (++test_counter > 4000) return;
+        if (++test_counter > 3500) return;
     }
 }
 
