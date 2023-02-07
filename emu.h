@@ -2,10 +2,10 @@
 #include <stdio.h>
 #include <string.h>
 
-#define Boolean unsigned char
-#define bool Boolean
-#define true 1
-#define false 0
+#define Boolean             unsigned char
+#define bool                Boolean
+#define true                1
+#define false               0
 
 #define PRG_ROM_PAGE_SIZE   0x4000
 #define CHR_ROM_PAGE_SIZE   0x2000
@@ -15,6 +15,9 @@
 #define RAM_MIRRORS_END     0x1FFF
 #define PPU_REGISTERS       0x2000
 #define PPU_REGISTERS_END   0x3FFF
+
+#define FRAME_WIDTH         256
+#define FRAME_HEIGHT        240
 
 enum Mirroring
 {
@@ -105,8 +108,8 @@ static unsigned char SYSTEM_PALETTE[192] = {
 
 typedef struct Frame
 {
-    unsigned char *data;
-    unsigned short data_len, WIDTH, HEIGHT;
+    unsigned char data[FRAME_WIDTH * FRAME_HEIGHT * 3];
+    int data_len;
 } Frame;
 
 typedef struct AddrRegister
@@ -181,27 +184,16 @@ typedef struct Emulator
 } Emulator;
 
 
-static void frame_clear(Frame *frame)
-{
-    if (frame->data != NULL)
-    {
-        free(frame->data);
-        frame->data = NULL;
-    }
-}
-
 static void frame_new(Frame *frame)
 {
-    //frame_clear(frame);
-    frame->WIDTH = 256;
-    frame->HEIGHT = 240;
-    frame->data_len = frame->WIDTH * frame->HEIGHT * 3;
-    frame->data = malloc(frame->data_len);
+    frame->data_len = FRAME_WIDTH * FRAME_HEIGHT * 3;
+    for (int i = 0; i < frame->data_len; i++)
+        frame->data[i] = 0;
 }
 
-static void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3])
+static int frame_set_pixel(Frame *frame, int i, short x, short y, unsigned char rgb[3])
 {
-    int base = y * 3 * frame->WIDTH + x * 3;
+    int base = i + (y * 3 * FRAME_WIDTH + x * 3);
 
     if (base + 2 < frame->data_len)
     {
@@ -216,49 +208,55 @@ static Frame *frame_show_tile(unsigned char chr_rom[], int bank, int tile_n)
     Frame *frame = malloc(sizeof(Frame));
     frame_new(frame);
 
+    printf("creating new frame ...\n");
+
     int f_bank = bank * 0x1000;
 
-    unsigned char tile[16];
+    unsigned char *tile;
 
-    for (int i = 0; i < 16; i++)
+    for (int i = 0; i < 256; i++)
     {
-        tile[i] = chr_rom[(f_bank + tile_n * 16) + i];
-    }
+        tile = &chr_rom[f_bank + (i * 16)];
 
-    for (int y = 0; y < 8; y++)
-    {
-        unsigned char   upper = tile[y],
-                        lower = tile[y + 8];
-
-        for (int x = 7; x >= 0; x++)
+        for (int y = 0; y < 8; y++)
         {
-            unsigned char value = (1 & upper) << 1 | (1 & lower);
+            unsigned char   upper = tile[y],
+                            lower = tile[y + 8];
 
-            upper >>= 1;
-            lower >>= 1;
-
-            unsigned char *rgb;
-
-            switch (value)
+            for (int x = 7; x >= 0; x--)
             {
-                case 0:
-                    rgb = &SYSTEM_PALETTE[0x01];
-                    break;
-                case 1:
-                    rgb = &SYSTEM_PALETTE[0x23];
-                    break;
-                case 2:
-                    rgb = &SYSTEM_PALETTE[0x27];
-                    break;
-                case 3:
-                    rgb = &SYSTEM_PALETTE[0x30];
-                    break;
+                unsigned char value = (1 & upper) << 1 | (1 & lower);
+
+                upper >>= 1;
+                lower >>= 1;
+
+                unsigned char *rgb;
+
+                switch (value)
+                {
+                    case 0:
+                        rgb = &SYSTEM_PALETTE[0x01];
+                        break;
+                    case 1:
+                        rgb = &SYSTEM_PALETTE[0x23];
+                        break;
+                    case 2:
+                        rgb = &SYSTEM_PALETTE[0x27];
+                        break;
+                    case 3:
+                        rgb = &SYSTEM_PALETTE[0x30];
+                        break;
+                    default: 
+                        break;
+                }
+                
+                frame_set_pixel(frame, i * 16, x, y, rgb);
             }
-            
-            frame_set_pixel(frame, x, y, rgb);
         }
     }
 
+    printf("frame created!\n");
+    
     return frame;
 }
 
@@ -364,7 +362,7 @@ static void ppu_write_to_ctrl(PPU *ppu, unsigned char value)
 
     if (!before_nmi_status 
     && ppu->ctrl & GENERATE_NMI 
-    && ppu->vblank_status)    //ppu->status & VERTICAL_BLANK
+    && ppu->status & VERTICAL_BLANK)
     {
         ppu->nmi_interrupt = true;
     }
@@ -464,13 +462,13 @@ static void ppu_write_to_data(PPU *ppu, unsigned char data)
     }
 }
 
-static int rom_load(Rom *rom, unsigned char data[])
+static bool rom_load(Rom *rom, unsigned char data[])
 {
     if (data[0] != 'N' && data[1] != 'E' 
     && data[2] != 'S'&& data[3] != 0x1A)
     {
         printf("File is not in iNES file format!\n");
-        return 0;
+        return false;
     }
 
     unsigned char ines_ver = (data[7] >> 2) & 0b11;
@@ -478,7 +476,7 @@ static int rom_load(Rom *rom, unsigned char data[])
     if (ines_ver != 0)
     {
         printf("iNES2.0 format not supported!\n");
-        return 0;
+        return false;
     }
 
     rom->mapper = (data[7] & 0b11110000) | (data[6] >> 4);
@@ -513,7 +511,7 @@ static int rom_load(Rom *rom, unsigned char data[])
 
     printf("Rom loaded successfully!\n");
 
-    return 1;
+    return true;
 }
 
 static unsigned char rom_read_prg_rom(Bus *bus, unsigned short addr)
@@ -542,7 +540,7 @@ static void bus_free_rom(Rom *rom)
 
 static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
 {
-    unsigned char mem_addr = addr;
+    unsigned char mem_addr = (unsigned char)addr >> 8;
 
     switch (addr)
     {
@@ -590,7 +588,7 @@ static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
             bus->cpu_vram[addr & 0b11111111111] = data;
             break;
         case PPU_REGISTERS:
-            bus->ppu.ctrl = data;
+            ppu_write_to_ctrl(&bus->ppu, data);
             break;
         case 0x2001:
             bus->ppu.mask = data;
@@ -1655,7 +1653,6 @@ static void cpu_ora(CPU *cpu, enum AddressingMode mode)
             unsigned short base = cpu_get_operand_address(cpu, Absolute);
             if ((addr >> 8) != (base >> 8))
                 cpu->cycles += 1;
-            printf("ORA new:%X old:%X\n", addr >> 8, base >> 8);
             break;
         case Indirect_Y:
             unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
@@ -1663,8 +1660,6 @@ static void cpu_ora(CPU *cpu, enum AddressingMode mode)
                             hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
 
             unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
-
-            printf("ORA new:%X old:%X\n", addr >> 8, deref >> 8);
 
             if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
@@ -1718,8 +1713,6 @@ static void cpu_lda(CPU *cpu, enum AddressingMode mode)
             unsigned short base = cpu_get_operand_address(cpu, Absolute);
             if ((addr >> 8) != (base >> 8))
                 cpu->cycles += 1;
-
-            printf("LDA IND Y - new:%X old:%X\n", addr >> 8, base >> 8);
             break;
         case Indirect_Y:
             unsigned char   base_8 = cpu_mem_read(&cpu->bus, cpu->program_counter),
@@ -1727,8 +1720,6 @@ static void cpu_lda(CPU *cpu, enum AddressingMode mode)
                             hi = cpu_mem_read(&cpu->bus, (unsigned short)((unsigned char)(base_8 + 1) % 0x100));
 
             unsigned short deref = (unsigned short)(hi << 8) | (unsigned short)lo;
-
-            printf("LDA IND Y - new:%X old:%X\n", addr >> 8, deref >> 8);
 
             if ((addr >> 8) != (deref >> 8))
                 cpu->cycles += 1;
@@ -1959,8 +1950,6 @@ static void cpu_asl(CPU *cpu, enum AddressingMode mode)
         else 
             cpu->status = cpu->status & 0b11111110;
 
-        printf("ASL A - old:%d new:%d C:%d\n", old_bit, cpu->register_a, cpu->status & Carry_Flag);
-
         cpu_update_zero_and_negative_flags(&cpu->status, cpu->register_a);
     }
     else
@@ -2081,7 +2070,7 @@ static void cpu_interpret(CPU *cpu)
 
         fprintf(
             f, 
-            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU:  0, 21 CYC:%d\n",
+            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU:  0, 0 CYC:%d\n",
             cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
             cpu->register_y, cpu->status, cpu->stack_pointer, cpu->cycles);
 
