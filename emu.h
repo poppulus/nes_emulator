@@ -1,3 +1,4 @@
+#include <SDL2/SDL.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -18,6 +19,8 @@
 
 #define FRAME_WIDTH         256
 #define FRAME_HEIGHT        240
+// value of width * height * 3
+#define FRAME_LENGTH        184320
 
 enum Mirroring
 {
@@ -108,38 +111,43 @@ static unsigned char SYSTEM_PALETTE[192] = {
 
 typedef struct Frame
 {
-    unsigned char data[FRAME_WIDTH * FRAME_HEIGHT * 3];
-    int data_len;
+    unsigned char   data[FRAME_LENGTH];
 } Frame;
 
 typedef struct AddrRegister
 {
     // high byte first, low second
-    unsigned char value[2];
-    bool hi_ptr;
+    unsigned char   value[2];
+    bool            hi_ptr:1;
 } AddrRegister;
+
+typedef struct ScrollRegister
+{
+    unsigned short  value, temp;
+    unsigned char   fine_x;
+    bool            toggle:1;
+} ScrollRegister;
 
 typedef struct PPU
 {
-    unsigned char   *chr_rom,
-                    palette_table[32],
-                    vram[2048],
-                    oam_data[256],
-                    oam_addr,
-                    internal_data_buf;
+    unsigned char           *chr_rom,
+                            palette_table[32],
+                            vram[2048],
+                            oam_data[256],
+                            oam_addr,
+                            internal_data_buf;
 
-    int cycles;
+    bool                    nmi_interrupt:1;
 
-    bool nmi_interrupt:1;
-
-    unsigned short scanline;
+    unsigned short          scanline, cycles;
 
     enum Mirroring          mirroring;
     enum ControlRegister    ctrl;
     enum MaskRegister       mask;
     enum StatusRegister     status;
 
-    AddrRegister addr;
+    AddrRegister            addr;
+    ScrollRegister          scroll;
 } PPU;
 
 typedef struct Rom
@@ -148,46 +156,54 @@ typedef struct Rom
                     *chr_rom,
                     mapper;
 
-    unsigned short prg_len, chr_len;
+    unsigned short  prg_len, chr_len;
 
-    enum Mirroring screen_mirroring;
+    enum Mirroring  screen_mirroring;
 } Rom;
 
 typedef struct Bus
 {
     unsigned char   cpu_vram[2048],
-                    cycles;
+                    *prg_rom;
+
+    unsigned int    cycles;
+
     Rom rom;
     PPU ppu;
 } Bus;
 
 typedef struct CPU
 {
-    unsigned char   register_a, 
-                    register_x, 
-                    register_y, 
-                    status,
-                    stack_pointer;
+    unsigned char           register_a, 
+                            register_x, 
+                            register_y,
+                            stack_pointer,
+                            memory[0xFFFF];
 
-    unsigned char   memory[0xFFFF];
+    enum ProcessorStatus    status;
 
-    unsigned short program_counter;
+    unsigned short          program_counter;
+    unsigned int            cycles;
 
-    unsigned int cycles;
+    bool                    quit:1;
 
-    Bus bus;
+    Bus                     bus;
 } CPU;
 
 typedef struct Emulator
 {
-    CPU cpu;
+    SDL_Window      *w;
+    SDL_Renderer    *r;
+    SDL_Texture     *t;
+    SDL_Event       e;
+    Frame           frame;
+    CPU             cpu;
 } Emulator;
 
 
-static void frame_new(Frame *frame)
+static void frame_init(Frame *frame)
 {
-    frame->data_len = FRAME_WIDTH * FRAME_HEIGHT * 3;
-    for (int i = 0; i < frame->data_len; i++)
+    for (int i = 0; i < FRAME_LENGTH; i++)
         frame->data[i] = 0;
 }
 
@@ -195,7 +211,7 @@ static void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3]
 {
     int base = y * 3 * FRAME_WIDTH + x * 3;
 
-    if (base + 2 < frame->data_len)
+    if (base + 2 < FRAME_LENGTH)
     {
         frame->data[base] = rgb[0];
         frame->data[base + 1] = rgb[1];
@@ -203,116 +219,118 @@ static void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3]
     }
 }
 
-static Frame *frame_show_tile(unsigned char chr_rom[], int bank, int tile_n)
+static unsigned char *bg_palette(PPU *ppu, unsigned short tile_column, unsigned short tile_row)
 {
-    Frame *frame = malloc(sizeof(Frame));
-    frame_new(frame);
+    unsigned char   *palette = malloc(4);
 
-    printf("creating new frame ...\n");
+    unsigned char   attr_table_idx = ((tile_row / 4) * 8) + (tile_column / 4),
+                    attr_byte = ppu->vram[0x03C0 + attr_table_idx];
 
-    int f_bank = 0; //bank * 0x1000;
+    unsigned char   palette_idx = 0;
 
-    unsigned char *tile;
-
-    for (int b = 0; b < 2; b++)
+    switch ((tile_column % 4) / 2)
     {
-        for (int i = 0; i < 256; i++)
-        {
-            tile = &chr_rom[(b * 0x1000) + (i * 16)];
-
-            unsigned char   tile_x = i % 32,
-                            tile_y = i / 32;
-
-            for (int y = 0; y < 8; y++)
-            {
-                unsigned char   upper = tile[y],
-                                lower = tile[y + 8];
-
-                for (int x = 7; x >= 0; x--)
-                {
-                    unsigned char value = (1 & upper) << 1 | (1 & lower);
-
-                    upper >>= 1;
-                    lower >>= 1;
-
-                    unsigned char *rgb;
-
-                    switch (value)
-                    {
-                        case 0:
-                            rgb = &SYSTEM_PALETTE[0x01];
-                            break;
-                        case 1:
-                            rgb = &SYSTEM_PALETTE[0x23];
-                            break;
-                        case 2:
-                            rgb = &SYSTEM_PALETTE[0x27];
-                            break;
-                        case 3:
-                            rgb = &SYSTEM_PALETTE[0x30];
-                            break;
-                        default: 
-                            break;
-                    }
-                    
-                    frame_set_pixel(frame, tile_x * 8 + x, tile_y * 8 + y, rgb);
-                }
-            }
-        }
+        default:
+            break;
+        case 0:
+            if (((tile_row % 4) / 2) == 0)
+                palette_idx = attr_byte & 0b00000011;
+            else if (((tile_row % 4) / 2) == 1)
+                palette_idx = (attr_byte >> 4) & 0b00000011;
+            break;
+        case 1:
+            if (((tile_row % 4) / 2) == 0)
+                palette_idx = (attr_byte >> 2) & 0b00000011;
+            else if (((tile_row % 4) / 2) == 1)
+                palette_idx = (attr_byte >> 6) & 0b00000011;
+            break;
     }
 
-    printf("frame created!\n");
-    
-    return frame;
+    unsigned char palette_start = 1 + (palette_idx * 4);
+
+    palette[0] = ppu->palette_table[0];
+    palette[1] = ppu->palette_table[palette_start];
+    palette[2] = ppu->palette_table[palette_start + 1];
+    palette[3] = ppu->palette_table[palette_start + 2];
+
+    return palette;
 }
 
 static void ppu_render(PPU *ppu, Frame *frame)
 {
     unsigned char bank = ppu->ctrl & BACKGROUND_PATTERN_ADDR;
 
-    for (int i = 0; i < 0x03c0; i++)
+    for (int i = 0; i < 0x03C0; i++)
     {
-        unsigned char   tile = ppu->vram[i],
+        unsigned short  tile = ppu->vram[i],
                         tile_x = i % 32,
-                        tile_y = i / 32,
-                        *b_tile = &ppu->chr_rom[bank + tile * 16];
+                        tile_y = i / 32;
 
-            for (int y = 0; y < 8; y++)
+        unsigned char   *b_tile = &ppu->chr_rom[(bank ? 4096 : 0) + (tile * 16)],
+                        *palette = bg_palette(ppu, tile_x, tile_y);
+
+        for (int y = 0; y < 8; y++)
+        {
+            unsigned char   upper = b_tile[y],
+                            lower = b_tile[y + 8];
+
+            for (int x = 7; x >= 0; x--)
             {
-                unsigned char   upper = b_tile[y],
-                                lower = b_tile[y + 8];
+                unsigned char value = (1 & upper) << 1 | (1 & lower);
 
-                for (int x = 7; x >= 0; x--)
+                upper >>= 1;
+                lower >>= 1;
+
+                unsigned char *rgb;
+
+                switch (value)
                 {
-                    unsigned char value = (1 & upper) << 1 | (1 & lower);
-
-                    upper >>= 1;
-                    lower >>= 1;
-
-                    unsigned char *rgb;
-
-                    switch (value)
-                    {
-                        case 0:
-                            rgb = &SYSTEM_PALETTE[0x01];
-                            break;
-                        case 1:
-                            rgb = &SYSTEM_PALETTE[0x23];
-                            break;
-                        case 2:
-                            rgb = &SYSTEM_PALETTE[0x27];
-                            break;
-                        case 3:
-                            rgb = &SYSTEM_PALETTE[0x30];
-                            break;
-                        default: 
-                            break;
-                    }
-                    
-                    frame_set_pixel(frame, tile_x * 8 + x, tile_y * 8 + y, rgb);
+                    case 0:
+                        rgb = &SYSTEM_PALETTE[palette[0]];
+                        break;
+                    case 1:
+                        rgb = &SYSTEM_PALETTE[palette[1]];
+                        break;
+                    case 2:
+                        rgb = &SYSTEM_PALETTE[palette[2]];
+                        break;
+                    case 3:
+                        rgb = &SYSTEM_PALETTE[palette[3]];
+                        break;
+                    default: 
+                        rgb = &SYSTEM_PALETTE[palette[0]];
+                        break;
                 }
+                
+                frame_set_pixel(frame, tile_x * 8 + x, tile_y * 8 + y, rgb);
             }
+        }
+
+        free(palette);
     }
+}
+
+static void cpu_callback(Emulator *emu)
+{
+    unsigned char *pixels;
+    int pitch;
+
+    ppu_render(&emu->cpu.bus.ppu, &emu->frame);
+
+    SDL_LockTexture(emu->t, NULL, (void**)&pixels, &pitch);
+    memcpy(pixels, emu->frame.data, FRAME_LENGTH);
+    SDL_UnlockTexture(emu->t);
+
+    SDL_RenderClear(emu->r);
+    SDL_RenderCopy(emu->r, emu->t, NULL, NULL);
+    SDL_RenderPresent(emu->r);
+
+    //while (SDL_PollEvent(&emu->e))
+    //{
+        //if (emu->e.type == SDL_QUIT)             emu->cpu.quit = true;
+        //else if (emu->e.type == SDL_KEYDOWN 
+        //&& emu->e.key.keysym.sym == SDLK_ESCAPE) emu->cpu.quit = true;
+    //}
 }
 
 static unsigned char vram_addr_increment(enum ControlRegister ctrl)
@@ -334,9 +352,9 @@ static void addr_set(AddrRegister *addr, unsigned short data)
     addr->value[1] = (unsigned char)(data & 0xFF);
 }
 
-static unsigned short addr_get(AddrRegister *addr)
+static unsigned short addr_get(AddrRegister addr)
 {
-    return (unsigned short)(addr->value[0] << 8) | (unsigned short)addr->value[1];
+    return (unsigned short)(addr.value[0] << 8) | (unsigned short)addr.value[1];
 }
 
 static void addr_update(AddrRegister *addr, unsigned char data)
@@ -344,8 +362,8 @@ static void addr_update(AddrRegister *addr, unsigned char data)
     if (addr->hi_ptr)   addr->value[0] = data;
     else                addr->value[1] = data;
     
-    if (addr_get(addr) > 0x3FFF)
-        addr_set(addr, addr_get(addr) & 0b11111111111111);
+    if (addr_get(*addr) > 0x3FFF)
+        addr_set(addr, addr_get(*addr) & 0x3FFF);
     
     addr->hi_ptr = !addr->hi_ptr;
 }
@@ -359,13 +377,13 @@ static void addr_increment(AddrRegister *addr, unsigned char inc)
 {
     unsigned char lo = addr->value[1];
 
-    addr->value[1] = (addr->value[1] + inc) % 0x100;
+    addr->value[1] = (addr->value[1] + inc);
 
     if (lo > addr->value[1])
-        addr->value[0] = (addr->value[0] + 1) % 0x100;
+        addr->value[0] = (addr->value[0] + 1);
 
-    if (addr_get(addr) > 0x3FFF)
-        addr_set(addr, addr_get(addr) & 0b11111111111111);
+    if (addr_get(*addr) > 0x3FFF)
+        addr_set(addr, addr_get(*addr) & 0x3FFF);
 }
 
 static bool ppu_tick(PPU *ppu, unsigned char cycles)
@@ -379,14 +397,19 @@ static bool ppu_tick(PPU *ppu, unsigned char cycles)
 
         if (ppu->scanline == 241)
         {
+            ppu->status |= VERTICAL_BLANK;
+            ppu->status &= 0b10111111;
+
             if (ppu->ctrl & GENERATE_NMI)
-                ppu->status |= VERTICAL_BLANK;
+                ppu->nmi_interrupt = true;
         }
 
         if (ppu->scanline >= 262)
         {
             ppu->scanline = 0;
+            ppu->nmi_interrupt = false;
             ppu->status &= 0b01111111;
+            ppu->status &= 0b10111111;
             return true;
         }
     }
@@ -400,10 +423,14 @@ static void ppu_load(PPU *ppu, unsigned char chr_rom[], enum Mirroring mirroring
     ppu->mirroring = mirroring;
 
     ppu->ctrl = 0;
-    ppu->cycles = 0;
+    ppu->cycles = 0;    // 21 for nestest.rom
     ppu->mask = 0;
     ppu->scanline = 0;
     ppu->status = 0b10100000;
+    ppu->scroll.toggle = false;
+    ppu->scroll.value = 0;
+    ppu->scroll.temp = 0;
+    ppu->scroll.fine_x = 0;
 
     ppu->nmi_interrupt = false;
 
@@ -421,7 +448,7 @@ static void ppu_write_to_ctrl(PPU *ppu, unsigned char value)
 {
     unsigned char before_nmi_status = ppu->ctrl & GENERATE_NMI;
 
-    ppu->ctrl |= value;
+    ppu->ctrl = value;
 
     if (!before_nmi_status 
     && ppu->ctrl & GENERATE_NMI 
@@ -447,23 +474,27 @@ static unsigned short ppu_mirror_vram_addr(PPU *ppu, unsigned short addr)
                     vram_index = mirrored_vram - 0x2000,
                     name_table = vram_index / 0x0400;
 
-    unsigned short value = vram_index;
+    unsigned short value;
 
     switch (ppu->mirroring)
     {
         case VERTICAL:
             if (name_table == 2 || name_table == 3)
                 value = vram_index - 0x0800;
+            else 
+                value = vram_index % 0x800;
             break;
         case HORIZONTAL:
             if (name_table == 1 || name_table == 2) 
                 value = vram_index - 0x0400;
             else if (name_table == 3)
                 value = vram_index - 0x0800;
+            else 
+                value = vram_index % 0x800;
             break;
         case FOUR_SCREEN:
-            break;
         default:
+            value = vram_index % 0x800;
             break;
     }
 
@@ -472,10 +503,8 @@ static unsigned short ppu_mirror_vram_addr(PPU *ppu, unsigned short addr)
 
 static unsigned char ppu_read_data(PPU *ppu)
 {
-    unsigned short addr = addr_get(&ppu->addr);
+    unsigned short addr = addr_get(ppu->addr);
     unsigned char data = 0;
-
-    ppu_increment_vram_addr(ppu);
 
     switch (addr)
     {
@@ -489,7 +518,7 @@ static unsigned char ppu_read_data(PPU *ppu)
             break;
         case 0x3000 ... 0x3EFF:
             break;
-        case 0x3f00 ... 0x3FFF:
+        case 0x3F00 ... 0x3FFF:
             data = ppu->palette_table[addr - 0x3F00];
             break;
         default:
@@ -501,9 +530,7 @@ static unsigned char ppu_read_data(PPU *ppu)
 
 static void ppu_write_to_data(PPU *ppu, unsigned char data)
 {
-    unsigned short addr = addr_get(&ppu->addr);
-
-    ppu_increment_vram_addr(ppu);
+    unsigned short addr = addr_get(ppu->addr);
 
     switch (addr)
     {
@@ -511,13 +538,27 @@ static void ppu_write_to_data(PPU *ppu, unsigned char data)
             ppu->internal_data_buf = data;
             ppu->chr_rom[addr] = ppu->internal_data_buf;
             break;
-        case 0x2000 ... 0x2FFF:
+        case 0x2000:
+        case 0x2001:
+        case 0x2002:
+        case 0x2003:
+        case 0x2004:
+            break;
+        case 0x2005:
+            
+            break;
+        case 0x2006:
+            break;
+        case 0x2007:
             ppu->internal_data_buf = data;
             ppu->vram[ppu_mirror_vram_addr(ppu, addr)] = ppu->internal_data_buf;
+            ppu_increment_vram_addr(ppu);
+            break;
+        case 0x2008 ... 0x2FFF:
             break;
         case 0x3000 ... 0x3EFF:
             break;
-        case 0x3f00 ... 0x3FFF:
+        case 0x3F00 ... 0x3FFF:
             ppu->palette_table[addr - 0x3F00] = data;
             break;
         default:
@@ -587,20 +628,18 @@ static unsigned char rom_read_prg_rom(Bus *bus, unsigned short addr)
     return bus->rom.prg_rom[addr];
 }
 
-static void bus_tick(Bus *bus, unsigned char cycles)
+static void bus_tick(Emulator *emu, unsigned char cycles)
 {
-    bus->cycles += cycles;
+    emu->cpu.bus.cycles += cycles;
 
-    unsigned char nmi_before = bus->ppu.nmi_interrupt;
+    unsigned char nmi_before = emu->cpu.bus.ppu.nmi_interrupt;
 
-    ppu_tick(&bus->ppu, cycles * 3);
+    ppu_tick(&emu->cpu.bus.ppu, cycles * 3);
 
-    unsigned char nmi_after = bus->ppu.nmi_interrupt;
+    unsigned char nmi_after = emu->cpu.bus.ppu.nmi_interrupt;
 
     if (!nmi_before && nmi_after)
-    {
-        
-    }
+        cpu_callback(emu);
 }
 
 static void bus_free_rom(Rom *rom)
@@ -613,12 +652,12 @@ static void bus_free_rom(Rom *rom)
 
 static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
 {
-    unsigned char mem_addr = (unsigned char)addr >> 8;
-
+    unsigned char mem_addr = 0;
+    //printf("bus mem read addr:%X\n", addr);
     switch (addr)
     {
         case RAM ... RAM_MIRRORS_END:
-            mem_addr = bus->cpu_vram[addr & 0b0000011111111111];
+            mem_addr = bus->cpu_vram[addr & 0x07FF];
             break;
         case PPU_REGISTERS:
         case 0x2001:
@@ -626,27 +665,30 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
         case 0x2005:
         case 0x2006:
         case 0x4014:
-            printf("attempt to read from write-only PPU address:%X\n", addr);
+            //printf("attempt to read from write-only PPU address:%X\n", addr);
             break;
         case 0x2002:
             mem_addr = bus->ppu.status;
             bus->ppu.status &= 0b01111111;
             bus->ppu.addr.hi_ptr = true;
+            bus->ppu.scroll.toggle = false;
             break;
         case 0x2004:
             mem_addr = bus->ppu.oam_data[bus->ppu.oam_addr];
             break;
         case 0x2007:
-            mem_addr = ppu_read_data(&bus->ppu);
+            mem_addr = bus->ppu.internal_data_buf;
+            bus->ppu.internal_data_buf = bus->ppu.vram[ppu_mirror_vram_addr(&bus->ppu, addr_get(bus->ppu.addr))];
+            ppu_increment_vram_addr(&bus->ppu);
             break;
         case 0x2008 ... PPU_REGISTERS_END:
-            mem_addr = bus_mem_read(bus, addr & 0b0010000000000111);
+            mem_addr = bus_mem_read(bus, addr & 0x2007);
             break;
         case 0x8000 ... 0xFFFF:
             mem_addr = rom_read_prg_rom(bus, addr);
             break;
         default: 
-            printf("ignoring memory access:%X\n", addr);
+            //printf("ignoring memory access:%X\n", addr);
             break;
     }
 
@@ -655,13 +697,16 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
 
 static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
 {
+    //printf("bus write data:%X address:%X\n", data, addr);
     switch (addr)
     {
         case RAM ... RAM_MIRRORS_END:
-            bus->cpu_vram[addr & 0b11111111111] = data;
+            bus->cpu_vram[addr & 0x7FF] = data;
             break;
         case PPU_REGISTERS:
             ppu_write_to_ctrl(&bus->ppu, data);
+            bus->ppu.scroll.temp |= (unsigned short)((data & 0b11) << 10);
+            printf("0x2000 write data:%X t:%X\n", data, bus->ppu.scroll.temp);
             break;
         case 0x2001:
             bus->ppu.mask = data;
@@ -673,11 +718,43 @@ static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
             bus->ppu.oam_data[bus->ppu.oam_addr] = data;
             bus->ppu.oam_addr++;
             break;
+        case 0x2005:
+            if (!bus->ppu.scroll.toggle)
+            {
+                bus->ppu.scroll.temp |= (unsigned short)((data & 0b11111000) >> 3);
+                bus->ppu.scroll.fine_x = data & 0b111;
+                bus->ppu.scroll.toggle = true;
+                printf("0x2005 first write data:%X t:%X x:%X\n", data, bus->ppu.scroll.temp, bus->ppu.scroll.fine_x);
+            }
+            else 
+            {
+                bus->ppu.scroll.temp |= (unsigned short)((data & 0b11111000) << 9);
+                bus->ppu.scroll.temp |= (unsigned short)((data & 0b111) << 12);
+                bus->ppu.scroll.toggle = false;
+                printf("0x2005 second write data:%X t:%X\n", data, bus->ppu.scroll.temp);
+            }
+            break;
         case 0x2006:
             ppu_write_to_ppu_addr(&bus->ppu, data);
+            if (!bus->ppu.scroll.toggle)
+            {
+                unsigned char a = data & 0b00111111;
+                bus->ppu.scroll.temp |= (unsigned short)(a << 8);
+                bus->ppu.scroll.temp &= 0b1011111111111111;
+                bus->ppu.scroll.toggle = true;
+                printf("0x2006 first write data:%X t:%X\n", data, bus->ppu.scroll.temp);
+            }
+            else
+            {
+                bus->ppu.scroll.temp |= (unsigned short)data;
+                bus->ppu.scroll.value = bus->ppu.scroll.temp;
+                bus->ppu.scroll.toggle = false;
+                printf("0x2006 second write data:%X t:%X value:%X\n", data, bus->ppu.scroll.temp, bus->ppu.scroll.value);
+            }
             break;
         case 0x2007:
-            ppu_write_to_data(&bus->ppu, data);
+            bus->ppu.vram[ppu_mirror_vram_addr(&bus->ppu, addr_get(bus->ppu.addr))] = data;
+            ppu_increment_vram_addr(&bus->ppu);
             break;
         case 0x4014:
             unsigned char lo = 0x00;
@@ -690,13 +767,14 @@ static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
             }
             break;
         case 0x2008 ... PPU_REGISTERS_END:
-            bus_mem_write(bus, addr & 0b0010000000000111, data);
+            bus_mem_write(bus, addr & 0x2007, data);
             break;
         case 0x8000 ... 0xFFFF:
-            printf("Attempt to write to cartridge ROM space!\n");
+            //printf("Attempt to write to cartridge ROM space!\n");
             break;
         default: 
-            printf("ignoring memory write-access:%X\n", addr);
+        case 0x2002:
+            //printf("ignoring memory write-access:%X\n", addr);
             break;
     }
 }
@@ -728,7 +806,7 @@ static void cpu_mem_write_u16(CPU *cpu, unsigned short pos, unsigned short data)
     cpu_mem_write(&cpu->bus, pos + 1, hi);
 }
 
-static void cpu_update_zero_and_negative_flags(unsigned char *cpu_status, unsigned char result)
+static void cpu_update_zero_and_negative_flags(enum ProcessorStatus *cpu_status, unsigned char result)
 {
     if (result == 0) *cpu_status = *cpu_status | Zero_Flag;
     else *cpu_status = *cpu_status & 0b11111101;
@@ -737,47 +815,47 @@ static void cpu_update_zero_and_negative_flags(unsigned char *cpu_status, unsign
     else *cpu_status = *cpu_status & 0b01111111;
 }
 
-static void cpu_clc(unsigned char *cpu_status)
+static void cpu_clc(enum ProcessorStatus *cpu_status)
 {
     *cpu_status = *cpu_status & 0b11111110;
 }
 
-static void cpu_sec(unsigned char *status)
+static void cpu_sec(enum ProcessorStatus *status)
 {
     *status = *status | Carry_Flag;
 }
 
-static void cpu_cld(unsigned char *status)
+static void cpu_cld(enum ProcessorStatus *status)
 {
     *status = *status & 0b11110111;
 }
 
-static void cpu_sed(unsigned char *status)
+static void cpu_sed(enum ProcessorStatus *status)
 {
     *status = *status | Decimal_Mode_Flag;
 }
 
-static void cpu_cli(unsigned char *status)
+static void cpu_cli(enum ProcessorStatus *status)
 {
     *status = *status & 0b11111011;
 }
 
-static void cpu_sei(unsigned char *status)
+static void cpu_sei(enum ProcessorStatus *status)
 {
     *status = *status | Interrupt_Disable_Flag;
 }
 
-static void cpu_zero_clear(unsigned char *status)
+static void cpu_zero_clear(enum ProcessorStatus *status)
 {
     *status = *status & 0b11111101;
 }
 
-static void cpu_zero_set(unsigned char *status)
+static void cpu_zero_set(enum ProcessorStatus *status)
 {
     *status = *status | Zero_Flag;
 }
 
-static void cpu_clv(unsigned char *status)
+static void cpu_clv(enum ProcessorStatus *status)
 {
     *status = *status & 0b10111111;
 }
@@ -812,7 +890,7 @@ static void rom_reset(Rom *rom)
     rom->prg_len = 0;
 }
 
-static void cpu_interrupt_nmi(CPU *cpu)
+static void cpu_interrupt_nmi(Emulator *emu, CPU *cpu)
 {
     cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer - 1, cpu->program_counter);
     cpu->stack_pointer -= 2;
@@ -827,7 +905,7 @@ static void cpu_interrupt_nmi(CPU *cpu)
 
     cpu->status |= Interrupt_Disable_Flag;
 
-    bus_tick(&cpu->bus, 2);
+    bus_tick(emu, 2);
 
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFA);
 }
@@ -847,14 +925,16 @@ static void cpu_init(CPU *cpu)
     cpu->register_a = 0;
     cpu->register_x = 0;
     cpu->register_y = 0;
-    cpu->status = 0b00100100;
+    cpu->status = 34;
     cpu->stack_pointer = 0xFD;     
-    cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFC); //   cpu_mem_read_u16(cpu, 0xFFFC);
+    cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFC);
                                    //   ... should be the standard 
-                                   //   testing with 0xC000 nestest.rom for now   
-    // for testing with nestest.rom                     
-    cpu->cycles = 7;
-    cpu->bus.cycles = 7;
+                                   //   testing with 0xC000 nestest.rom  
+    cpu->cycles = 0;
+    cpu->bus.cycles = 0;
+    cpu->bus.prg_rom = cpu->bus.rom.prg_rom;
+
+    cpu->quit = false;
 }
 
 static void cpu_reset(CPU *cpu)
@@ -1281,7 +1361,7 @@ static void cpu_sya(CPU *cpu, enum AddressingMode mode)
 static bool cpu_top(CPU *cpu, enum AddressingMode mode)
 {
     unsigned short addr = cpu_get_operand_address(cpu, mode);
-    bool extra_cycle = true;
+    bool extra_cycle = false;
 
     if (mode == Absolute_X)
     {
@@ -2270,1455 +2350,1445 @@ static void cpu_test(CPU *cpu)
     
     int test_counter = 1;
 
-    unsigned char   val1 = cpu_mem_read(&cpu->bus, cpu->program_counter + 1),
+    unsigned char   opscode = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                    val1 = cpu_mem_read(&cpu->bus, cpu->program_counter + 1),
                     val2 = cpu_mem_read(&cpu->bus, cpu->program_counter + 2);
 
-    /*
-    printf(
-        "\nPC:%d OP:%d VAL1:%d VAL2:%d ", 
-        cpu->program_counter, 
-        opscode, 
-        val1, 
-        val2);
+    while (test_counter < 8992)
+    {
+        fprintf(
+            f, 
+            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU: %d,%d CYC:%d\n",
+            cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
+            cpu->register_y, cpu->status, cpu->stack_pointer, cpu->bus.ppu.scanline, cpu->bus.ppu.cycles, cpu->cycles);
 
-    printf(
-        "A:%d X:%d Y:%d P:%d SP:%d\n",
-        cpu->register_a,
-        cpu->register_x,
-        cpu->register_y,
-        cpu->status,
-        cpu->stack_pointer);
+        test_counter++;
+    }
 
-    
-    
-    // "C799  85 01     STA $01 = FF                    A:00 X:00 Y:00 P:66 SP:FB"
-
-    printf("program counter: %d\n", test_counter);
-
-    fprintf(
-        f, 
-        "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU:  0, 0 CYC:%d\n",
-        cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
-        cpu->register_y, cpu->status, cpu->stack_pointer, cpu->cycles);
-
-    */
-
-    if (++test_counter > 8991) return;
+    fclose(f);
 }
 
-static void cpu_interpret(CPU *cpu)
+static void cpu_interpret(Emulator *emu, CPU *cpu)
 {
-    //printf("start cpu interpret loop\n");
+    
+    unsigned char   program_counter_state = 0,
+                    opcode_cycles = 0,
+                    opscode = cpu_mem_read(&cpu->bus, cpu->program_counter);
 
-    //while (1)
-    //{
-        unsigned char   program_counter_state = 0,
-                        opcode_cycles = 0,
-                        opscode = cpu_mem_read(&cpu->bus, cpu->program_counter);
+    if (cpu->bus.ppu.nmi_interrupt)
+        cpu_interrupt_nmi(emu, cpu);
 
-        if (cpu->bus.ppu.nmi_interrupt)
-            cpu_interrupt_nmi(cpu);
+    /*
+    printf( 
+    "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU: %d,%d CYC:%d\n",
+    cpu->program_counter, 
+    opscode, 
+    cpu_mem_read(&cpu->bus, cpu->program_counter + 1), 
+    cpu_mem_read(&cpu->bus, cpu->program_counter + 2), 
+    cpu->register_a, cpu->register_x,  cpu->register_y, 
+    cpu->status, cpu->stack_pointer, 
+    cpu->bus.ppu.scanline, cpu->bus.ppu.cycles, 
+    cpu->cycles);
+    */
+        
+    cpu->program_counter++;
 
-        cpu->program_counter++;
+    switch (opscode)
+    {
+        case 0x02:
+        case 0x12:
+        case 0x22:
+        case 0x32:
+        case 0x42:
+        case 0x52:
+        case 0x62:
+        case 0x72:
+        case 0x92:
+        case 0xB2:
+        case 0xD2:
+        case 0xF2:
+            cpu_kil(cpu);
+            cpu->quit = true;
+            return;
 
-        switch (opscode)
-        {
-            case 0x02:
-            case 0x12:
-            case 0x22:
-            case 0x32:
-            case 0x42:
-            case 0x52:
-            case 0x62:
-            case 0x72:
-            case 0x92:
-            case 0xB2:
-            case 0xD2:
-            case 0xF2:
-                cpu_kil(cpu);
-lockup:
-                goto lockup;
-                return;
+        case 0x40: 
+            cpu_rti(cpu); 
+            cpu->cycles += 6; 
+            opcode_cycles = 6;
+            break;
 
-            case 0x40: 
-                cpu_rti(cpu); 
-                cpu->cycles += 6; 
-                opcode_cycles += 6;
-                break;
+        case 0x28: 
+            cpu_plp(cpu); 
+            cpu->cycles += 4; 
+            opcode_cycles = 4;
+            break;
 
-            case 0x28: 
-                cpu_plp(cpu); 
-                cpu->cycles += 4; 
-                opcode_cycles += 4;
-                break;
+        case 0x68: 
+            cpu_pla(cpu); 
+            cpu->cycles += 4; 
+            opcode_cycles = 4;
+            break;
 
-            case 0x68: 
-                cpu_pla(cpu); 
-                cpu->cycles += 4; 
-                opcode_cycles += 4;
-                break;
+        case 0x08: 
+            cpu_php(cpu); 
+            cpu->cycles += 3; 
+            opcode_cycles = 3;
+            break;
 
-            case 0x08: 
-                cpu_php(cpu); 
-                cpu->cycles += 3; 
-                opcode_cycles += 3;
-                break;
+        case 0x48: 
+            cpu_pha(cpu);
+            cpu->cycles += 3;
+            opcode_cycles = 3;
+            break;
 
-            case 0x48: 
-                cpu_pha(cpu);
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
+        case 0x9A: 
+            cpu_txs(cpu); 
+            cpu->cycles += 2; 
+            opcode_cycles = 2;
+            break;
 
-            case 0x9A: 
-                cpu_txs(cpu); 
-                cpu->cycles += 2; 
-                opcode_cycles += 2;
-                break;
+        case 0xBA: 
+            cpu_tsx(cpu); 
+            cpu->cycles += 2; 
+            opcode_cycles = 2;
+            break;
 
-            case 0xBA: 
-                cpu_tsx(cpu); 
-                cpu->cycles += 2; 
-                opcode_cycles += 2;
-                break;
+        case 0xA2:
+            opcode_cycles += cpu_ldx(cpu, Immediate); 
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xA6:
+            opcode_cycles += cpu_ldx(cpu, Zero_Page); 
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xB6:
+            opcode_cycles += cpu_ldx(cpu, Zero_Page_Y); 
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xAE:
+            opcode_cycles += cpu_ldx(cpu, Absolute); 
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xBE:
+            opcode_cycles += cpu_ldx(cpu, Absolute_Y); 
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0xA2:
-                opcode_cycles += cpu_ldx(cpu, Immediate); 
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xA6:
-                opcode_cycles += cpu_ldx(cpu, Zero_Page); 
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xB6:
-                opcode_cycles += cpu_ldx(cpu, Zero_Page_Y); 
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xAE:
-                opcode_cycles += cpu_ldx(cpu, Absolute); 
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xBE:
-                opcode_cycles += cpu_ldx(cpu, Absolute_Y); 
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0xA0:
+            opcode_cycles += cpu_ldy(cpu, Immediate); 
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xA4:
+            opcode_cycles += cpu_ldy(cpu, Zero_Page); 
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xB4:
+            opcode_cycles += cpu_ldy(cpu, Zero_Page_X); 
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xAC:
+            opcode_cycles += cpu_ldy(cpu, Absolute); 
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xBC:
+            opcode_cycles += cpu_ldy(cpu, Absolute_X); 
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0xA0:
-                opcode_cycles += cpu_ldy(cpu, Immediate); 
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xA4:
-                opcode_cycles += cpu_ldy(cpu, Zero_Page); 
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xB4:
-                opcode_cycles += cpu_ldy(cpu, Zero_Page_X); 
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xAC:
-                opcode_cycles += cpu_ldy(cpu, Absolute); 
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xBC:
-                opcode_cycles += cpu_ldy(cpu, Absolute_X); 
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0xBB:
+            opcode_cycles += cpu_lar(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0xBB:
-                opcode_cycles += cpu_lar(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0xA7:
+            opcode_cycles += cpu_lax(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xB7:
+            opcode_cycles += cpu_lax(cpu, Zero_Page_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xAF:
+            opcode_cycles += cpu_lax(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xBF:
+            opcode_cycles += cpu_lax(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xA3:
+            opcode_cycles += cpu_lax(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xB3:
+            opcode_cycles += cpu_lax(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xA7:
-                opcode_cycles += cpu_lax(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xB7:
-                opcode_cycles += cpu_lax(cpu, Zero_Page_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xAF:
-                opcode_cycles += cpu_lax(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xBF:
-                opcode_cycles += cpu_lax(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xA3:
-                opcode_cycles += cpu_lax(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xB3:
-                opcode_cycles += cpu_lax(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-
-            case 0x0B:
-            case 0x2B:
-                cpu_aac(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-                
-            case 0x87:
-                cpu_aax(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x97:
-                cpu_aax(cpu, Zero_Page_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x83:
-                cpu_aax(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x8F:
-                cpu_aax(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-
-            case 0x6B:
-                cpu_arr(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x4B:
-                cpu_asr(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xAB:
-                cpu_atx(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x93:
-                cpu_axa(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x9F:
-                cpu_axa(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0xCB:
-                cpu_axs(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-
-            case 0xC7:
-                cpu_dcp(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0xD7:
-                cpu_dcp(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xCF:
-                cpu_dcp(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xDF:
-                cpu_dcp(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0xDB:
-                cpu_dcp(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0xC3:
-                cpu_dcp(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0xD3:
-                cpu_dcp(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-
-            case 0x27:
-                cpu_rla(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x37:
-                cpu_rla(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x2F:
-                cpu_rla(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x3F:
-                cpu_rla(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x3B:
-                cpu_rla(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x23:
-                cpu_rla(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0x33:
-                cpu_rla(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-
-            case 0x67:
-                cpu_rra(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x77:
-                cpu_rra(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x6F:
-                cpu_rra(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x7F:
-                cpu_rra(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x7B:
-                cpu_rra(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x63:
-                cpu_rra(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0x73:
-                cpu_rra(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-
-            /*  adc start   */
-            case 0x69:
-                opcode_cycles += cpu_adc(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x65:
-                opcode_cycles += cpu_adc(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x75:
-                opcode_cycles += cpu_adc(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x6D:
-                opcode_cycles += cpu_adc(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x7D:
-                opcode_cycles += cpu_adc(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x79:
-                opcode_cycles += cpu_adc(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x61:
-                opcode_cycles += cpu_adc(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x71:
-                opcode_cycles += cpu_adc(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            /*  adc end     */
-
-            case 0xE9:
-                opcode_cycles += cpu_sbc(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xEB:
-                opcode_cycles += cpu_sbc(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xE5:
-                opcode_cycles += cpu_sbc(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xF5:
-                opcode_cycles += cpu_sbc(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xED:
-                opcode_cycles += cpu_sbc(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xFD:
-                opcode_cycles += cpu_sbc(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xF9:
-                opcode_cycles += cpu_sbc(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xE1:
-                opcode_cycles += cpu_sbc(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xF1:
-                opcode_cycles += cpu_sbc(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-
-            case 0xE7:
-                cpu_isc(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0xF7:
-                cpu_isc(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xEF:
-                cpu_isc(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xFF:
-                cpu_isc(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0xFB:
-                cpu_isc(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0xE3:
-                cpu_isc(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0xF3:
-                cpu_isc(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-
-            case 0x07:
-                cpu_slo(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x17:
-                cpu_slo(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x0F:
-                cpu_slo(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x1F:
-                cpu_slo(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x1B:
-                cpu_slo(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x03:
-                cpu_slo(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0x13:
-                cpu_slo(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-
-            case 0x47:
-                cpu_sre(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x57:
-                cpu_sre(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x4F:
-                cpu_sre(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x5F:
-                cpu_sre(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x5B:
-                cpu_sre(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
-            case 0x43:
-                cpu_sre(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
-            case 0x53:
-                cpu_sre(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 8;
-                opcode_cycles += 8;
-                break;
+        case 0x0B:
+        case 0x2B:
+            cpu_aac(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
             
-            case 0x9E:
-                cpu_sxa(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x87:
+            cpu_aax(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x97:
+            cpu_aax(cpu, Zero_Page_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x83:
+            cpu_aax(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x8F:
+            cpu_aax(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
 
-            case 0x9C:
-                cpu_sya(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x6B:
+            cpu_arr(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x4B:
+            cpu_asr(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xAB:
+            cpu_atx(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x93:
+            cpu_axa(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x9F:
+            cpu_axa(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0xCB:
+            cpu_axs(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
 
-            case 0x8B:
-                cpu_xaa(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
+        case 0xC7:
+            cpu_dcp(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0xD7:
+            cpu_dcp(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xCF:
+            cpu_dcp(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xDF:
+            cpu_dcp(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0xDB:
+            cpu_dcp(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0xC3:
+            cpu_dcp(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0xD3:
+            cpu_dcp(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
 
-            case 0x9B:
-                cpu_xas(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x27:
+            cpu_rla(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x37:
+            cpu_rla(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x2F:
+            cpu_rla(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x3F:
+            cpu_rla(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x3B:
+            cpu_rla(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x23:
+            cpu_rla(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0x33:
+            cpu_rla(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
 
-            case 0x29: 
-                opcode_cycles += cpu_and(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x25: 
-                opcode_cycles += cpu_and(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x35: 
-                opcode_cycles += cpu_and(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x2D: 
-                opcode_cycles += cpu_and(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x3D: 
-                opcode_cycles += cpu_and(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x39: 
-                opcode_cycles += cpu_and(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x21: 
-                opcode_cycles += cpu_and(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x31: 
-                opcode_cycles += cpu_and(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x67:
+            cpu_rra(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x77:
+            cpu_rra(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x6F:
+            cpu_rra(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x7F:
+            cpu_rra(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x7B:
+            cpu_rra(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x63:
+            cpu_rra(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0x73:
+            cpu_rra(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
 
-            case 0x49:
-                opcode_cycles += cpu_eor(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x45:
-                opcode_cycles += cpu_eor(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x55:
-                opcode_cycles += cpu_eor(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x4D:
-                opcode_cycles += cpu_eor(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x5D:
-                opcode_cycles += cpu_eor(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x59:
-                opcode_cycles += cpu_eor(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x41:
-                opcode_cycles += cpu_eor(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x51:
-                opcode_cycles += cpu_eor(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        /*  adc start   */
+        case 0x69:
+            opcode_cycles += cpu_adc(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x65:
+            opcode_cycles += cpu_adc(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x75:
+            opcode_cycles += cpu_adc(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x6D:
+            opcode_cycles += cpu_adc(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x7D:
+            opcode_cycles += cpu_adc(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x79:
+            opcode_cycles += cpu_adc(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x61:
+            opcode_cycles += cpu_adc(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x71:
+            opcode_cycles += cpu_adc(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        /*  adc end     */
 
-            case 0x09:
-                opcode_cycles += cpu_ora(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x05:
-                opcode_cycles += cpu_ora(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x15:
-                opcode_cycles += cpu_ora(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x0D:
-                opcode_cycles += cpu_ora(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x1D:
-                opcode_cycles += cpu_ora(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x19:
-                opcode_cycles += cpu_ora(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x01:
-                opcode_cycles += cpu_ora(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x11:
-                opcode_cycles += cpu_ora(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0xE9:
+            opcode_cycles += cpu_sbc(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xEB:
+            opcode_cycles += cpu_sbc(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xE5:
+            opcode_cycles += cpu_sbc(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xF5:
+            opcode_cycles += cpu_sbc(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xED:
+            opcode_cycles += cpu_sbc(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xFD:
+            opcode_cycles += cpu_sbc(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xF9:
+            opcode_cycles += cpu_sbc(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xE1:
+            opcode_cycles += cpu_sbc(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xF1:
+            opcode_cycles += cpu_sbc(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0x58: 
-                cpu_cli(&cpu->status); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x78: 
-                cpu_sei(&cpu->status);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
+        case 0xE7:
+            cpu_isc(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0xF7:
+            cpu_isc(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xEF:
+            cpu_isc(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xFF:
+            cpu_isc(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0xFB:
+            cpu_isc(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0xE3:
+            cpu_isc(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0xF3:
+            cpu_isc(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
 
-            /*      STA begin   */
-            case 0x85:
-                cpu_sta(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x95:
-                cpu_sta(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x8D:
-                cpu_sta(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x9D:
-                cpu_sta(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x99:
-                cpu_sta(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x81:
-                cpu_sta(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x91:
-                cpu_sta(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            /*      STA end     */
+        case 0x07:
+            cpu_slo(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x17:
+            cpu_slo(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x0F:
+            cpu_slo(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x1F:
+            cpu_slo(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x1B:
+            cpu_slo(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x03:
+            cpu_slo(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0x13:
+            cpu_slo(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
 
-            case 0x86:
-                cpu_stx(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x96:
-                cpu_stx(cpu, Zero_Page_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x8E:
-                cpu_stx(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0x47:
+            cpu_sre(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x57:
+            cpu_sre(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x4F:
+            cpu_sre(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x5F:
+            cpu_sre(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x5B:
+            cpu_sre(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+        case 0x43:
+            cpu_sre(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        case 0x53:
+            cpu_sre(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 8;
+            opcode_cycles += 8;
+            break;
+        
+        case 0x9E:
+            cpu_sxa(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0x84:
-                cpu_sty(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x94:
-                cpu_sty(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0x8C:
-                cpu_sty(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0x9C:
+            cpu_sya(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xA9: 
-                opcode_cycles += cpu_lda(cpu, Immediate); 
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xA5:
-                opcode_cycles += cpu_lda(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xB5:
-                opcode_cycles += cpu_lda(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xAD:
-                opcode_cycles += cpu_lda(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xBD:
-                opcode_cycles += cpu_lda(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xB9:
-                opcode_cycles += cpu_lda(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xA1:
-                opcode_cycles += cpu_lda(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xB1:
-                opcode_cycles += cpu_lda(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x8B:
+            cpu_xaa(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
 
-            case 0xAA: 
-                cpu_tax(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x8A: 
-                cpu_txa(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xA8: 
-                cpu_tay(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x98: 
-                cpu_tya(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
+        case 0x9B:
+            cpu_xas(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xE6: 
-                cpu_inc(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0xF6: 
-                cpu_inc(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xEE: 
-                cpu_inc(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xFE: 
-                cpu_inc(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
+        case 0x29: 
+            opcode_cycles += cpu_and(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x25: 
+            opcode_cycles += cpu_and(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x35: 
+            opcode_cycles += cpu_and(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x2D: 
+            opcode_cycles += cpu_and(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x3D: 
+            opcode_cycles += cpu_and(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x39: 
+            opcode_cycles += cpu_and(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x21: 
+            opcode_cycles += cpu_and(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x31: 
+            opcode_cycles += cpu_and(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xC9:
-                opcode_cycles += cpu_cmp(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xC5:
-                opcode_cycles += cpu_cmp(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xD5:
-                opcode_cycles += cpu_cmp(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xCD:
-                opcode_cycles += cpu_cmp(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xDD:
-                opcode_cycles += cpu_cmp(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xD9:
-                opcode_cycles += cpu_cmp(cpu, Absolute_Y);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
-            case 0xC1:
-                opcode_cycles += cpu_cmp(cpu, Indirect_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xD1:
-                opcode_cycles += cpu_cmp(cpu, Indirect_Y);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x49:
+            opcode_cycles += cpu_eor(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x45:
+            opcode_cycles += cpu_eor(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x55:
+            opcode_cycles += cpu_eor(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x4D:
+            opcode_cycles += cpu_eor(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x5D:
+            opcode_cycles += cpu_eor(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x59:
+            opcode_cycles += cpu_eor(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x41:
+            opcode_cycles += cpu_eor(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x51:
+            opcode_cycles += cpu_eor(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xE0:
-                cpu_cpx(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xE4:
-                cpu_cpx(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xEC:
-                cpu_cpx(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0x09:
+            opcode_cycles += cpu_ora(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x05:
+            opcode_cycles += cpu_ora(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x15:
+            opcode_cycles += cpu_ora(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x0D:
+            opcode_cycles += cpu_ora(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x1D:
+            opcode_cycles += cpu_ora(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x19:
+            opcode_cycles += cpu_ora(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x01:
+            opcode_cycles += cpu_ora(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x11:
+            opcode_cycles += cpu_ora(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0xC0:
-                cpu_cpy(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xC4:
-                cpu_cpy(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0xCC:
-                cpu_cpy(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0x58: 
+            cpu_cli(&cpu->status); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x78: 
+            cpu_sei(&cpu->status);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
 
-            case 0xC6:
-                cpu_dec(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0xD6:
-                cpu_dec(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xCE:
-                cpu_dec(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0xDE:
-                cpu_dec(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
+        /*      STA begin   */
+        case 0x85:
+            cpu_sta(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x95:
+            cpu_sta(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x8D:
+            cpu_sta(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x9D:
+            cpu_sta(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x99:
+            cpu_sta(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x81:
+            cpu_sta(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x91:
+            cpu_sta(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        /*      STA end     */
 
-            case 0x4C: 
-                cpu_jmp(cpu, Absolute);
-                cpu->cycles += 3;
-                opcode_cycles += 3;
-                break;
-            case 0x6C:
-                cpu_jmp(cpu, Indirect);
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
+        case 0x86:
+            cpu_stx(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x96:
+            cpu_stx(cpu, Zero_Page_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x8E:
+            cpu_stx(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0xCA: 
-                cpu_dex(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x88: 
-                cpu_dey(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xC8: 
-                cpu_iny(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xE8: 
-                cpu_inx(cpu); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x18: 
-                cpu_clc(&cpu->status);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x38: 
-                cpu_sec(&cpu->status); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xB8: 
-                cpu_clv(&cpu->status);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xD8: 
-                cpu_cld(&cpu->status); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xF8: 
-                cpu_sed(&cpu->status); 
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
+        case 0x84:
+            cpu_sty(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x94:
+            cpu_sty(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0x8C:
+            cpu_sty(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0x0A: 
-                cpu_asl(cpu, Accumulator);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x06:
-                cpu_asl(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x16:
-                cpu_asl(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x0E:
-                cpu_asl(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x1E:
-                cpu_asl(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
+        case 0xA9: 
+            opcode_cycles += cpu_lda(cpu, Immediate); 
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xA5:
+            opcode_cycles += cpu_lda(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xB5:
+            opcode_cycles += cpu_lda(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xAD:
+            opcode_cycles += cpu_lda(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xBD:
+            opcode_cycles += cpu_lda(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xB9:
+            opcode_cycles += cpu_lda(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xA1:
+            opcode_cycles += cpu_lda(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xB1:
+            opcode_cycles += cpu_lda(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0x4A: 
-                cpu_lsr(cpu, Accumulator);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x46:
-                cpu_lsr(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x56:
-                cpu_lsr(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x4E:
-                cpu_lsr(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x5E:
-                cpu_lsr(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
+        case 0xAA: 
+            cpu_tax(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x8A: 
+            cpu_txa(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xA8: 
+            cpu_tay(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x98: 
+            cpu_tya(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
 
-            case 0x2A: 
-                cpu_rol(cpu, Accumulator);
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x26:
-                cpu_rol(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles += 5;
-                break;
-            case 0x36:
-                cpu_rol(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x2E:
-                cpu_rol(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles += 6;
-                break;
-            case 0x3E:
-                cpu_rol(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles += 7;
-                break;
+        case 0xE6: 
+            cpu_inc(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0xF6: 
+            cpu_inc(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xEE: 
+            cpu_inc(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xFE: 
+            cpu_inc(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
 
-            case 0x6A:
-                cpu_ror(cpu, Accumulator); 
-                cpu->cycles += 2;
-                opcode_cycles = 2;
-                break;
-            case 0x66:
-                cpu_ror(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 5;
-                opcode_cycles = 5;
-                break;
-            case 0x76:
-                cpu_ror(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 6;
-                opcode_cycles = 6;
-                break;
-            case 0x6E:
-                cpu_ror(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 6;
-                opcode_cycles = 6;
-                break;
-            case 0x7E:
-                cpu_ror(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 7;
-                opcode_cycles = 7;
-                break;
+        case 0xC9:
+            opcode_cycles += cpu_cmp(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xC5:
+            opcode_cycles += cpu_cmp(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xD5:
+            opcode_cycles += cpu_cmp(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xCD:
+            opcode_cycles += cpu_cmp(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xDD:
+            opcode_cycles += cpu_cmp(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xD9:
+            opcode_cycles += cpu_cmp(cpu, Absolute_Y);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+        case 0xC1:
+            opcode_cycles += cpu_cmp(cpu, Indirect_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xD1:
+            opcode_cycles += cpu_cmp(cpu, Indirect_Y);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0x90:
-                opcode_cycles += cpu_bcc(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xB0:
-                opcode_cycles += cpu_bcs(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xF0:
-                opcode_cycles += cpu_beq(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0xD0:
-                opcode_cycles += cpu_bne(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x24:
-                cpu_bit(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles = 3;
-                break;
-            case 0x2C:
-                cpu_bit(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles = 4;
-                break;
-            case 0x30:
-                opcode_cycles += cpu_bmi(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x10:
-                opcode_cycles += cpu_bpl(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x50:
-                opcode_cycles += cpu_bvc(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
-            case 0x70:
-                opcode_cycles += cpu_bvs(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles += 2;
-                break;
+        case 0xE0:
+            cpu_cpx(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xE4:
+            cpu_cpx(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xEC:
+            cpu_cpx(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0x20: 
-                cpu_jsr(cpu); 
-                cpu->cycles += 6;
-                opcode_cycles = 6;
-                break;
-            case 0x60: 
-                cpu_rts(cpu);
-                cpu->cycles += 6;
-                opcode_cycles = 6;
-                break;
+        case 0xC0:
+            cpu_cpy(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xC4:
+            cpu_cpy(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0xCC:
+            cpu_cpy(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
 
-            case 0xEA:
-            case 0x1A:
-            case 0x3A:
-            case 0x5A:
-            case 0x7A:
-            case 0xDA:
-            case 0xFA:
-                cpu_nop(cpu);
-                cpu->cycles += 2;
-                opcode_cycles = 2;
-                break;
+        case 0xC6:
+            cpu_dec(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0xD6:
+            cpu_dec(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xCE:
+            cpu_dec(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0xDE:
+            cpu_dec(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
 
-            case 0x80:
-            case 0x82:
-            case 0x89:
-            case 0xC2:
-            case 0xE2:
-                cpu_dop(cpu, Immediate);
-                cpu->program_counter += 1;
-                cpu->cycles += 2;
-                opcode_cycles = 2;
-                break;
-            case 0x04:
-            case 0x44:
-            case 0x64:
-                cpu_dop(cpu, Zero_Page);
-                cpu->program_counter += 1;
-                cpu->cycles += 3;
-                opcode_cycles = 3;
-                break;
-            case 0x14:
-            case 0x34:
-            case 0x54:
-            case 0x74:
-            case 0xD4:
-            case 0xF4:
-                cpu_dop(cpu, Zero_Page_X);
-                cpu->program_counter += 1;
-                cpu->cycles += 4;
-                opcode_cycles = 4;
-                break;
+        case 0x4C: 
+            cpu_jmp(cpu, Absolute);
+            cpu->cycles += 3;
+            opcode_cycles += 3;
+            break;
+        case 0x6C:
+            cpu_jmp(cpu, Indirect);
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
 
-            case 0x0C:
-                cpu_top(cpu, Absolute);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles = 4;
-                break;
-            case 0x1C:
-            case 0x3C:
-            case 0x5C:
-            case 0x7C:
-            case 0xDC:
-            case 0xFC:
-                opcode_cycles += cpu_top(cpu, Absolute_X);
-                cpu->program_counter += 2;
-                cpu->cycles += 4;
-                opcode_cycles += 4;
-                break;
+        case 0xCA: 
+            cpu_dex(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x88: 
+            cpu_dey(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xC8: 
+            cpu_iny(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xE8: 
+            cpu_inx(cpu); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x18: 
+            cpu_clc(&cpu->status);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x38: 
+            cpu_sec(&cpu->status); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xB8: 
+            cpu_clv(&cpu->status);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xD8: 
+            cpu_cld(&cpu->status); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xF8: 
+            cpu_sed(&cpu->status); 
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
 
-            case 0x00: 
-                cpu_brk(cpu);
-                cpu->cycles += 7;
-                opcode_cycles = 7;
-                break;
-        }
+        case 0x0A: 
+            cpu_asl(cpu, Accumulator);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x06:
+            cpu_asl(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x16:
+            cpu_asl(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x0E:
+            cpu_asl(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x1E:
+            cpu_asl(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
 
-        bus_tick(&cpu->bus, opcode_cycles);
+        case 0x4A: 
+            cpu_lsr(cpu, Accumulator);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x46:
+            cpu_lsr(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x56:
+            cpu_lsr(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x4E:
+            cpu_lsr(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x5E:
+            cpu_lsr(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
 
-        //if (program_counter_state == cpu->program_counter)
-        //    cpu->program_counter += (unsigned short)opscode - 1;
-    //}
+        case 0x2A: 
+            cpu_rol(cpu, Accumulator);
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x26:
+            cpu_rol(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles += 5;
+            break;
+        case 0x36:
+            cpu_rol(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x2E:
+            cpu_rol(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles += 6;
+            break;
+        case 0x3E:
+            cpu_rol(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles += 7;
+            break;
+
+        case 0x6A:
+            cpu_ror(cpu, Accumulator); 
+            cpu->cycles += 2;
+            opcode_cycles = 2;
+            break;
+        case 0x66:
+            cpu_ror(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 5;
+            opcode_cycles = 5;
+            break;
+        case 0x76:
+            cpu_ror(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 6;
+            opcode_cycles = 6;
+            break;
+        case 0x6E:
+            cpu_ror(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 6;
+            opcode_cycles = 6;
+            break;
+        case 0x7E:
+            cpu_ror(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 7;
+            opcode_cycles = 7;
+            break;
+
+        case 0x90:
+            opcode_cycles += cpu_bcc(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xB0:
+            opcode_cycles += cpu_bcs(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xF0:
+            opcode_cycles += cpu_beq(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0xD0:
+            opcode_cycles += cpu_bne(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x24:
+            cpu_bit(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles = 3;
+            break;
+        case 0x2C:
+            cpu_bit(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles = 4;
+            break;
+        case 0x30:
+            opcode_cycles += cpu_bmi(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x10:
+            opcode_cycles += cpu_bpl(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x50:
+            opcode_cycles += cpu_bvc(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+        case 0x70:
+            opcode_cycles += cpu_bvs(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles += 2;
+            break;
+
+        case 0x20: 
+            cpu_jsr(cpu); 
+            cpu->cycles += 6;
+            opcode_cycles = 6;
+            break;
+        case 0x60: 
+            cpu_rts(cpu);
+            cpu->cycles += 6;
+            opcode_cycles = 6;
+            break;
+
+        case 0xEA:
+        case 0x1A:
+        case 0x3A:
+        case 0x5A:
+        case 0x7A:
+        case 0xDA:
+        case 0xFA:
+            cpu_nop(cpu);
+            cpu->cycles += 2;
+            opcode_cycles = 2;
+            break;
+
+        case 0x80:
+        case 0x82:
+        case 0x89:
+        case 0xC2:
+        case 0xE2:
+            cpu_dop(cpu, Immediate);
+            cpu->program_counter += 1;
+            cpu->cycles += 2;
+            opcode_cycles = 2;
+            break;
+        case 0x04:
+        case 0x44:
+        case 0x64:
+            cpu_dop(cpu, Zero_Page);
+            cpu->program_counter += 1;
+            cpu->cycles += 3;
+            opcode_cycles = 3;
+            break;
+        case 0x14:
+        case 0x34:
+        case 0x54:
+        case 0x74:
+        case 0xD4:
+        case 0xF4:
+            cpu_dop(cpu, Zero_Page_X);
+            cpu->program_counter += 1;
+            cpu->cycles += 4;
+            opcode_cycles = 4;
+            break;
+
+        case 0x0C:
+            cpu_top(cpu, Absolute);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles = 4;
+            break;
+        case 0x1C:
+        case 0x3C:
+        case 0x5C:
+        case 0x7C:
+        case 0xDC:
+        case 0xFC:
+            opcode_cycles += cpu_top(cpu, Absolute_X);
+            cpu->program_counter += 2;
+            cpu->cycles += 4;
+            opcode_cycles += 4;
+            break;
+
+        case 0x00: 
+            cpu_brk(cpu);
+            cpu->cycles += 7;
+            opcode_cycles = 7;
+            break;
+    }
+
+    bus_tick(emu, opcode_cycles);
+
+    //if (program_counter_state == cpu->program_counter)
+    //    cpu->program_counter += (unsigned short)opscode - 1;
 }
 
 static void e_file_handler(unsigned char *buffer, int len)
@@ -3765,6 +3835,8 @@ static void test_format_mem_access(const char *filename)
 
     printf("reset cpu\n");
     cpu_init(&cpu);
+    ppu_load(&cpu.bus.ppu, cpu.bus.rom.chr_rom, cpu.bus.rom.screen_mirroring);
+    addr_reset(&cpu.bus.ppu.addr);
     
     /*
     bus_mem_write(&cpu.bus, 100, 0x11);
@@ -3781,7 +3853,7 @@ static void test_format_mem_access(const char *filename)
     printf("0064  11 33     ORA ($33),Y = 0400 @ 0400 = AA  A:00 X:00 Y:00 P:24 SP:FD");
     */
 
-    cpu_interpret(&cpu);
+    //cpu_interpret(&cpu);
 
     printf("free file buffer\n");
     free(file_buffer);
