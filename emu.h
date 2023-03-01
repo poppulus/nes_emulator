@@ -17,10 +17,12 @@
 #define PPU_REGISTERS       0x2000
 #define PPU_REGISTERS_END   0x3FFF
 
-#define FRAME_WIDTH         256
+#define FRAME_WIDTH         256 
 #define FRAME_HEIGHT        240
 // value of width * height * 3
 #define FRAME_LENGTH        184320
+// width of frame/screen * 3 = 256 * 3
+#define FRAME_PITCH         768
 
 enum Mirroring
 {
@@ -57,7 +59,7 @@ enum AddressingMode
     None_Addressing
 };
 
-enum ControlRegister
+enum PPUControlRegister
 {
     NAMETABLE1                  = 0b00000001,
     NAMETABLE2                  = 0b00000010,
@@ -69,7 +71,7 @@ enum ControlRegister
     GENERATE_NMI                = 0b10000000,
 };
 
-enum MaskRegister
+enum PPUMaskRegister
 {
     GREYSCALE           = 0b00000001,
     BACKGROUND_LEFTMOST = 0b00000010,
@@ -81,7 +83,7 @@ enum MaskRegister
     EMPHASIZE_BLUE      = 0b10000000
 };
 
-enum StatusRegister
+enum PPUStatusRegister
 {
     PPU_BUS_1       = 0b00000001,
     PPU_BUS_2       = 0b00000010,
@@ -109,6 +111,71 @@ static unsigned char SYSTEM_PALETTE[192] = {
     0x99, 0xFF, 0xFC, 0xDD, 0xDD, 0xDD, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11
 };
 
+enum JoypadButton
+{
+    RIGHT   = 0b10000000,
+    LEFT    = 0b01000000,
+    DOWN    = 0b00100000,
+    UP      = 0b00010000,
+    START   = 0b00001000,
+    SELECT  = 0b00000100,
+    B       = 0b00000010,
+    A       = 0b00000001
+};
+
+enum AudioStatusRegister
+{
+    PULSE_WAVE_ONE  = 0b00000001,
+    PULSE_WAVE_TWO  = 0b00000010,
+    TRIANGLE_WAVE   = 0b00000100,
+    NOISE_WAVE      = 0b00001000,
+    DMC_ACTIVE      = 0b00010000,
+    FRAME_INTERRUPT = 0b01000000,
+    DMC_INTERRUPT   = 0b10000000
+};
+
+enum AudioCounterRegister
+{
+    IRQ_INHIBIT = 0b01000000,
+    STEP_MODE   = 0b10000000,
+};
+
+enum SweepRegister
+{
+    SHIFT_COUNT_1   = 0b00000001,
+    SHIFT_COUNT_2   = 0b00000010,
+    SHIFT_COUNT_3   = 0b00000100,
+    NEGATE          = 0b00001000,
+    DIVIDER_1       = 0b00010000,
+    DIVIDER_2       = 0b00100000,
+    DIVIDER_3       = 0b01000000,
+    ENABLED         = 0b10000000
+};
+
+typedef struct Pulse_Wave
+{
+    enum SweepRegister sweep;
+
+    unsigned char   timer_low, 
+                    timer_high;
+} Pulse_Wave;
+
+typedef struct Joypad
+{
+    bool                strobe:1;
+    unsigned char       index, button_status;
+} Joypad;
+
+typedef struct Rect
+{
+    short   x1, y1, x2, y2;
+} Rect;
+
+typedef struct Palette
+{
+    unsigned char   p1, p2, p3, p4;
+} Palette;
+
 typedef struct Frame
 {
     unsigned char   data[FRAME_LENGTH];
@@ -123,10 +190,49 @@ typedef struct AddrRegister
 
 typedef struct ScrollRegister
 {
-    unsigned short  value, temp;
-    unsigned char   fine_x;
+    unsigned char   x, y;
     bool            toggle:1;
 } ScrollRegister;
+
+typedef struct SdlRelated
+{
+    SDL_Window      *w;
+    SDL_Renderer    *r;
+    SDL_Texture     *t;
+    Frame           frame;
+    SDL_Event       e;
+} SdlRelated;
+
+typedef struct PulseChannel
+{
+    unsigned length_counter;
+} Pulse;
+
+typedef struct TriangleChannel
+{
+    unsigned length_counter;
+} Triangle;
+
+typedef struct NoiseChannel
+{
+    unsigned length_counter;
+} Noise;
+
+typedef struct SampleChannel
+{
+
+} Sample;
+
+typedef struct AudioProcessingUnit
+{
+    enum AudioStatusRegister status;
+    enum AudioCounterRegister ctr_register;
+
+    Pulse       pulse1, pulse2;
+    Triangle    triangle;
+    Noise       noise;
+    Sample      dmc;
+} APU;
 
 typedef struct PPU
 {
@@ -135,16 +241,17 @@ typedef struct PPU
                             vram[2048],
                             oam_data[256],
                             oam_addr,
-                            internal_data_buf;
+                            internal_data_buf,
+                            latch;
 
-    bool                    nmi_interrupt:1;
+    bool                    nmi_interrupt:1, nmi_write:1;
 
     unsigned short          scanline, cycles;
 
     enum Mirroring          mirroring;
-    enum ControlRegister    ctrl;
-    enum MaskRegister       mask;
-    enum StatusRegister     status;
+    enum PPUControlRegister ctrl;
+    enum PPUMaskRegister    mask;
+    enum PPUStatusRegister  status;
 
     AddrRegister            addr;
     ScrollRegister          scroll;
@@ -168,8 +275,11 @@ typedef struct Bus
 
     unsigned int    cycles;
 
+    Joypad joypad1;
     Rom rom;
     PPU ppu;
+    APU apu;
+    SdlRelated *sdl_related;
 } Bus;
 
 typedef struct CPU
@@ -177,29 +287,54 @@ typedef struct CPU
     unsigned char           register_a, 
                             register_x, 
                             register_y,
-                            stack_pointer,
-                            memory[0xFFFF];
+                            stack_pointer;
+                            //memory[0xFFFF];
 
     enum ProcessorStatus    status;
 
     unsigned short          program_counter;
     unsigned int            cycles;
 
-    bool                    quit:1;
-
     Bus                     bus;
 } CPU;
 
 typedef struct Emulator
 {
-    SDL_Window      *w;
-    SDL_Renderer    *r;
-    SDL_Texture     *t;
-    SDL_Event       e;
-    Frame           frame;
+    SdlRelated      sdl_related;
     CPU             cpu;
+    bool            quit:1;
 } Emulator;
 
+
+static void joypad_init(Joypad *joypad)
+{
+    joypad->button_status = 0;
+    joypad->index = 0;
+    joypad->strobe = false;
+}
+
+static void joypad_write(Joypad *joypad, unsigned char data)
+{
+    joypad->strobe = data & 1;
+
+    if (joypad->strobe)
+        joypad->index = 0;
+}
+
+static unsigned char joypad_read(Joypad *joypad)
+{
+    unsigned char response = 0;
+
+    if (joypad->index > 7)
+        return 1;
+
+    response = (joypad->button_status & (1 << joypad->index)) >> joypad->index;
+
+    if (!joypad->strobe && joypad->index <= 7)
+        joypad->index += 1;
+
+    return response;
+}
 
 static void frame_init(Frame *frame)
 {
@@ -209,9 +344,9 @@ static void frame_init(Frame *frame)
 
 static void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3])
 {
-    int base = y * 3 * FRAME_WIDTH + x * 3;
+    int base = (y * 3 * FRAME_WIDTH) + (x * 3);
 
-    if (base + 2 < FRAME_LENGTH)
+    if ((base + 2) < FRAME_LENGTH)
     {
         frame->data[base] = rgb[0];
         frame->data[base + 1] = rgb[1];
@@ -219,64 +354,89 @@ static void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3]
     }
 }
 
-static unsigned char *bg_palette(PPU *ppu, unsigned short tile_column, unsigned short tile_row)
+static Palette bg_palette(PPU *ppu, unsigned char *attr_table, unsigned char tile_column, unsigned char tile_row)
 {
-    unsigned char   *palette = malloc(4);
+    Palette palette;
 
     unsigned char   attr_table_idx = ((tile_row / 4) * 8) + (tile_column / 4),
-                    attr_byte = ppu->vram[0x03C0 + attr_table_idx];
+                    attr_byte = attr_table[attr_table_idx];
 
     unsigned char   palette_idx = 0;
 
-    switch ((tile_column % 4) / 2)
+    /*
+        ________________
+       |       ||       |
+       |       ||       |
+       |       ||       |
+       |-------||-------|
+       |       ||       |
+       |       ||       |
+       |       ||       |
+        ----------------
+    */
+
+    if ((tile_column % 4 / 2) == 0)
     {
-        default:
-            break;
-        case 0:
-            if (((tile_row % 4) / 2) == 0)
-                palette_idx = attr_byte & 0b00000011;
-            else if (((tile_row % 4) / 2) == 1)
-                palette_idx = (attr_byte >> 4) & 0b00000011;
-            break;
-        case 1:
-            if (((tile_row % 4) / 2) == 0)
-                palette_idx = (attr_byte >> 2) & 0b00000011;
-            else if (((tile_row % 4) / 2) == 1)
-                palette_idx = (attr_byte >> 6) & 0b00000011;
-            break;
+        if ((tile_row % 4 / 2) == 0)
+        {
+            palette_idx = attr_byte & 0b11;
+        }
+        else if ((tile_row % 4 / 2) == 1)
+        {
+            palette_idx = (attr_byte >> 4) & 0b11;
+        }
+    }
+    else if ((tile_column % 4 / 2) == 1)
+    {
+        if ((tile_row % 4 / 2) == 0)
+        {
+            palette_idx = (attr_byte >> 2) & 0b11;
+        }
+        else if ((tile_row % 4 / 2) == 1)
+        {
+            palette_idx = (attr_byte >> 6) & 0b11;
+        }
     }
 
     unsigned char palette_start = 1 + (palette_idx * 4);
 
-    palette[0] = ppu->palette_table[0];
-    palette[1] = ppu->palette_table[palette_start];
-    palette[2] = ppu->palette_table[palette_start + 1];
-    palette[3] = ppu->palette_table[palette_start + 2];
+    palette.p1 = ppu->palette_table[0];
+    palette.p2 = ppu->palette_table[palette_start];
+    palette.p3 = ppu->palette_table[palette_start + 1];
+    palette.p4 = ppu->palette_table[palette_start + 2];
 
     return palette;
 }
 
-static void ppu_render(PPU *ppu, Frame *frame)
+static void ppu_render_name_table(
+    PPU *ppu, 
+    Frame *frame, 
+    unsigned char *name_table, 
+    Rect viewport,
+    short shift_x, 
+    short shift_y)
 {
-    unsigned char bank = ppu->ctrl & BACKGROUND_PATTERN_ADDR;
+    unsigned char   bank        = ppu->ctrl & BACKGROUND_PATTERN_ADDR,
+                    *attr_table = &name_table[0x3C0];
 
-    for (int i = 0; i < 0x03C0; i++)
+    for (int i = 0; i < 0x3C0; i++)
     {
-        unsigned short  tile = ppu->vram[i],
-                        tile_x = i % 32,
-                        tile_y = i / 32;
+        unsigned short  tile_idx = name_table[i];
 
-        unsigned char   *b_tile = &ppu->chr_rom[(bank ? 4096 : 0) + (tile * 16)],
-                        *palette = bg_palette(ppu, tile_x, tile_y);
+        unsigned char   tile_column = i % 32,
+                        tile_row = i / 32,
+                        *tile = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
 
-        for (int y = 0; y < 8; y++)
+        Palette         palette = bg_palette(ppu, attr_table, tile_column, tile_row);
+
+        for (int y = 0; y <= 7; y++)
         {
-            unsigned char   upper = b_tile[y],
-                            lower = b_tile[y + 8];
+            unsigned char   upper = tile[y],
+                            lower = tile[y + 8];
 
             for (int x = 7; x >= 0; x--)
             {
-                unsigned char value = (1 & upper) << 1 | (1 & lower);
+                unsigned char value = (1 & lower) << 1 | (1 & upper);
 
                 upper >>= 1;
                 lower >>= 1;
@@ -286,57 +446,351 @@ static void ppu_render(PPU *ppu, Frame *frame)
                 switch (value)
                 {
                     case 0:
-                        rgb = &SYSTEM_PALETTE[palette[0]];
+                        rgb = &SYSTEM_PALETTE[palette.p1];
                         break;
                     case 1:
-                        rgb = &SYSTEM_PALETTE[palette[1]];
+                        rgb = &SYSTEM_PALETTE[palette.p2];
                         break;
                     case 2:
-                        rgb = &SYSTEM_PALETTE[palette[2]];
+                        rgb = &SYSTEM_PALETTE[palette.p3];
                         break;
                     case 3:
-                        rgb = &SYSTEM_PALETTE[palette[3]];
+                        rgb = &SYSTEM_PALETTE[palette.p4];
                         break;
                     default: 
-                        rgb = &SYSTEM_PALETTE[palette[0]];
+                        // should not be
                         break;
                 }
-                
-                frame_set_pixel(frame, tile_x * 8 + x, tile_y * 8 + y, rgb);
+
+                unsigned char   pixel_x = (tile_column * 8) + x,
+                                pixel_y = (tile_row * 8) + y;
+
+                if (pixel_x >= viewport.x1 && pixel_x < viewport.x2 
+                && pixel_y >= viewport.y1 && pixel_y < viewport.y2)
+                {
+                    frame_set_pixel(
+                        frame, 
+                        (short)(shift_x + pixel_x), 
+                        (short)(shift_y + pixel_y), 
+                        rgb);
+                }
             }
         }
-
-        free(palette);
     }
 }
 
-static void cpu_callback(Emulator *emu)
+static Palette ppu_sprite_palette(PPU *ppu, unsigned char palette_idx)
+{
+    Palette palette;
+
+    unsigned char start = 0x11 + (palette_idx * 4);
+
+    palette.p1 = 0;
+    palette.p2 = ppu->palette_table[start];
+    palette.p3 = ppu->palette_table[start + 1];
+    palette.p4 = ppu->palette_table[start + 2];
+
+    return palette;
+}
+
+static void ppu_render(PPU *ppu, Frame *frame)
+{
+    unsigned char   scroll_x = ppu->scroll.x,
+                    scroll_y = ppu->scroll.y;
+
+    unsigned char   *main_nametable, 
+                    *second_nametable,
+                    name_table = ppu->ctrl & 0b11;
+
+    Rect rect;
+
+    switch (ppu->mirroring)
+    {
+        case VERTICAL:
+            if (name_table == 0 || name_table == 2)
+            {
+                main_nametable = &ppu->vram[0];
+                second_nametable = &ppu->vram[0x400];
+            }
+            else if (name_table == 1 || name_table == 3)
+            {
+                main_nametable = &ppu->vram[0x400];
+                second_nametable = &ppu->vram[0];
+            }
+            break;
+        case HORIZONTAL:
+            if (name_table == 0 || name_table == 1)
+            {
+                main_nametable = &ppu->vram[0];
+                second_nametable = &ppu->vram[0x400];
+            }
+            else if (name_table == 2 || name_table == 3)
+            {
+                main_nametable = &ppu->vram[0x400];
+                second_nametable = &ppu->vram[0];
+            }
+        case FOUR_SCREEN:
+        default:
+            main_nametable = &ppu->vram[0];
+            second_nametable = &ppu->vram[0x400];
+            break;
+    }
+
+    rect.x1 = scroll_x;
+    rect.y1 = scroll_y;
+    rect.x2 = 256;
+    rect.y2 = 240;
+
+    ppu_render_name_table(
+        ppu, 
+        frame, 
+        main_nametable, 
+        rect, 
+        (short)-scroll_x, (short)-scroll_y);
+
+    if (scroll_x > 0)
+    {
+        rect.x1 = 0;
+        rect.y1 = 0;
+        rect.x2 = scroll_x;
+        rect.y2 = 240;
+        
+        ppu_render_name_table(
+            ppu, 
+            frame, 
+            second_nametable, 
+            rect, 
+            (short)256 - scroll_x, 0);
+    }
+    else if (scroll_y > 0)
+    {
+        rect.x1 = 0;
+        rect.y1 = 0;
+        rect.x2 = 256;
+        rect.y2 = scroll_y;
+        
+        ppu_render_name_table(
+            ppu, 
+            frame, 
+            second_nametable, 
+            rect, 
+            0, (short)240 - scroll_y);
+    }
+    
+    /*
+    unsigned char   oam_buffer[32], 
+                    m = 0, 
+                    sprite_count = 0;
+
+    memset(oam_buffer, 0xFF, 32);
+
+    for (int n = 0; n < 256; n += 4)
+    {
+        if (ppu->oam_data[n] > 0 && ppu->oam_data[n] < 0xEF)
+        {
+            if (++sprite_count < 9)
+            {
+                oam_buffer[m] = ppu->oam_data[n];
+                oam_buffer[m + 1] = ppu->oam_data[n + 1];
+                oam_buffer[m + 2] = ppu->oam_data[n + 2];
+                oam_buffer[m + 3] = ppu->oam_data[n + 3];
+
+                m += 4;
+
+                //if (m > 31) break;
+            }
+            else break;
+        }
+    }
+    */
+
+    // draw sprites
+    for (int i = 252; i >= 0; i -= 4)
+    {
+        unsigned char   tile_y              = ppu->oam_data[i],
+                        tile_idx            = ppu->oam_data[i + 1],
+                        tile_x              = ppu->oam_data[i + 3];
+
+        bool            flip_vertical       = ppu->oam_data[i + 2] & 0b10000000 ? true : false,
+                        flip_horizontal     = ppu->oam_data[i + 2] & 0b01000000 ? true : false;
+
+        unsigned char   palette_idx         = ppu->oam_data[i + 2] & 0b11;
+
+        Palette         sprite_palette      = ppu_sprite_palette(ppu, palette_idx);
+
+        unsigned char   bank                = ppu->ctrl & SPRITE_PATTERN_ADDR,
+                        *tile               = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
+
+        for (int y = 0; y <= 7; y++)
+        {
+            unsigned char   upper = tile[y],
+                            lower = tile[y + 8];
+
+            for (int x = 7; x >= 0; x--)
+            {
+                //bool behind_background   = ppu->oam_data[i + 2] & 0b00100000 ? true : false;
+
+                //if (behind_background) continue;
+
+                unsigned char value = (1 & lower) << 1 | (1 & upper);
+
+                upper >>= 1;
+                lower >>= 1;
+
+                unsigned char *rgb;
+
+                switch (value)
+                {
+                    default:
+                        // should not happen
+                    case 0:
+                        continue;
+                    case 1:
+                        rgb = &SYSTEM_PALETTE[sprite_palette.p2];
+                        break;
+                    case 2:
+                        rgb = &SYSTEM_PALETTE[sprite_palette.p3];
+                        break;
+                    case 3:
+                        rgb = &SYSTEM_PALETTE[sprite_palette.p4];
+                        break;
+                }
+
+                switch (flip_horizontal)
+                {
+                    case false:
+                        if (flip_vertical == false)
+                            frame_set_pixel(
+                                frame, 
+                                (short)tile_x + x, 
+                                (short)tile_y + y, 
+                                rgb);
+                        else
+                            frame_set_pixel(
+                                frame, 
+                                (short)tile_x + x, 
+                                (short)tile_y + 7 - y, 
+                                rgb);
+                        break;
+                    case true:
+                        if (flip_vertical == false)
+                            frame_set_pixel(
+                                frame, 
+                                (short)tile_x + 7 - x, 
+                                (short)tile_y + y, 
+                                rgb);
+                        else
+                            frame_set_pixel(
+                                frame, 
+                                (short)tile_x + 7 - x, 
+                                (short)tile_y + 7 - y, 
+                                rgb);
+                        break;
+                }
+            }
+        }
+    }
+}
+
+static void cpu_callback(Bus *bus)
 {
     unsigned char *pixels;
     int pitch;
 
-    ppu_render(&emu->cpu.bus.ppu, &emu->frame);
+    ppu_render(&bus->ppu, &bus->sdl_related->frame);
 
-    SDL_LockTexture(emu->t, NULL, (void**)&pixels, &pitch);
-    memcpy(pixels, emu->frame.data, FRAME_LENGTH);
-    SDL_UnlockTexture(emu->t);
+    SDL_LockTexture(bus->sdl_related->t, NULL, (void**)&pixels, &pitch);
+    memcpy(pixels, bus->sdl_related->frame.data, FRAME_LENGTH);
+    SDL_UnlockTexture(bus->sdl_related->t);
 
-    SDL_RenderClear(emu->r);
-    SDL_RenderCopy(emu->r, emu->t, NULL, NULL);
-    SDL_RenderPresent(emu->r);
+    SDL_RenderClear(bus->sdl_related->r);
+    SDL_RenderCopy(bus->sdl_related->r, bus->sdl_related->t, NULL, NULL);
+    SDL_RenderPresent(bus->sdl_related->r);
 
-    //while (SDL_PollEvent(&emu->e))
-    //{
-        //if (emu->e.type == SDL_QUIT)             emu->cpu.quit = true;
-        //else if (emu->e.type == SDL_KEYDOWN 
-        //&& emu->e.key.keysym.sym == SDLK_ESCAPE) emu->cpu.quit = true;
-    //}
+    while (SDL_PollEvent(&bus->sdl_related->e))
+    {
+        if (bus->sdl_related->e.type == SDL_KEYDOWN)
+        {
+            if (!bus->sdl_related->e.key.repeat)
+            {
+                switch (bus->sdl_related->e.key.keysym.sym)
+                {
+                    case SDLK_d:
+                        if (bus->joypad1.button_status & LEFT)
+                            bus->joypad1.button_status &= 0b10111111;
+
+                        bus->joypad1.button_status |= RIGHT;
+                        break;
+                    case SDLK_a:
+                        if (bus->joypad1.button_status & RIGHT)
+                            bus->joypad1.button_status &= 0b01111111;
+
+                        bus->joypad1.button_status |= LEFT;
+                        break;
+                    case SDLK_s:
+                        if (bus->joypad1.button_status & UP)
+                            bus->joypad1.button_status &= 0b11101111;
+
+                        bus->joypad1.button_status |= DOWN;
+                        break;
+                    case SDLK_w:
+                        if (bus->joypad1.button_status & DOWN)
+                            bus->joypad1.button_status &= 0b11011111;
+
+                        bus->joypad1.button_status |= UP;
+                        break;
+                    case SDLK_RETURN:
+                        bus->joypad1.button_status |= START;
+                        break;
+                    case SDLK_RSHIFT:
+                        bus->joypad1.button_status |= SELECT;
+                        break;
+                    case SDLK_COMMA:
+                        bus->joypad1.button_status |= B;
+                        break;
+                    case SDLK_PERIOD:
+                        bus->joypad1.button_status |= A;
+                        break;
+                }
+            }
+        }
+        else if (bus->sdl_related->e.type == SDL_KEYUP)
+        {
+            switch (bus->sdl_related->e.key.keysym.sym)
+            {
+                case SDLK_d:
+                    bus->joypad1.button_status &= 0b01111111;
+                    break;
+                case SDLK_a:
+                    bus->joypad1.button_status &= 0b10111111;
+                    break;
+                case SDLK_s:
+                    bus->joypad1.button_status &= 0b11011111;
+                    break;
+                case SDLK_w:
+                    bus->joypad1.button_status &= 0b11101111;
+                    break;
+                case SDLK_RETURN:
+                    bus->joypad1.button_status &= 0b11110111;
+                    break;
+                case SDLK_RSHIFT:
+                    bus->joypad1.button_status &= 0b11111011;
+                    break;
+                case SDLK_COMMA:
+                    bus->joypad1.button_status &= 0b11111101;
+                    break;
+                case SDLK_PERIOD:
+                    bus->joypad1.button_status &= 0b11111110;
+                    break;
+            }
+        }
+    }
 }
 
-static unsigned char vram_addr_increment(enum ControlRegister ctrl)
+static unsigned char vram_addr_increment(enum PPUControlRegister ctrl)
 {
-    if (ctrl & VRAM_ADD_INCREMENT)  return 1;
-    else                            return 32;
+    if (ctrl & VRAM_ADD_INCREMENT)  return 32;
+    else                            return 1;
 }
 
 static void addr_reset(AddrRegister *addr)
@@ -380,18 +834,44 @@ static void addr_increment(AddrRegister *addr, unsigned char inc)
     addr->value[1] = (addr->value[1] + inc);
 
     if (lo > addr->value[1])
-        addr->value[0] = (addr->value[0] + 1);
+        addr->value[0] += 1;
 
     if (addr_get(*addr) > 0x3FFF)
         addr_set(addr, addr_get(*addr) & 0x3FFF);
 }
 
-static bool ppu_tick(PPU *ppu, unsigned char cycles)
+static bool ppu_is_sprite_0_hit(PPU *ppu)
+{
+    unsigned char   y = ppu->oam_data[0], 
+                    x = ppu->oam_data[3];
+
+    return (y == ppu->scanline) && (x <= ppu->cycles) && (ppu->mask & SPRITES_SHOW);
+}
+
+static bool ppu_tick(PPU *ppu, unsigned short cycles)
 {
     ppu->cycles += cycles;
 
-    if (ppu->cycles > 341)
+    if (ppu->cycles >= 1 && ppu->cycles <= 64)
     {
+        
+    }
+    else if (ppu->cycles >= 65 && ppu->cycles <= 256)
+    {
+        //if (ppu->cycles % 2 == 0)
+        //{
+            
+        //}
+    }
+    else if (ppu->cycles >= 257 && ppu->cycles <= 320)
+    {
+        ppu->oam_addr = 0;
+    }
+    else if (ppu->cycles >= 341)
+    {
+        if (ppu_is_sprite_0_hit(ppu))
+            ppu->status |= SPRITE_0_HIT;
+
         ppu->cycles -= 341;
         ppu->scanline += 1;
 
@@ -408,8 +888,9 @@ static bool ppu_tick(PPU *ppu, unsigned char cycles)
         {
             ppu->scanline = 0;
             ppu->nmi_interrupt = false;
-            ppu->status &= 0b01111111;
+            ppu->nmi_write = false;
             ppu->status &= 0b10111111;
+            ppu->status &= 0b01111111;
             return true;
         }
     }
@@ -423,16 +904,20 @@ static void ppu_load(PPU *ppu, unsigned char chr_rom[], enum Mirroring mirroring
     ppu->mirroring = mirroring;
 
     ppu->ctrl = 0;
-    ppu->cycles = 0;    // 21 for nestest.rom
+    ppu->cycles = 0;
     ppu->mask = 0;
     ppu->scanline = 0;
     ppu->status = 0b10100000;
+    ppu->latch = 0;
+    ppu->oam_addr = 0;
+    ppu->internal_data_buf = 0;
+
     ppu->scroll.toggle = false;
-    ppu->scroll.value = 0;
-    ppu->scroll.temp = 0;
-    ppu->scroll.fine_x = 0;
+    ppu->scroll.x = 0;
+    ppu->scroll.y = 0;
 
     ppu->nmi_interrupt = false;
+    ppu->nmi_write = false;
 
     for (int i = 0; i < 2048; i++)
         ppu->vram[i] = 0;
@@ -472,29 +957,24 @@ static unsigned short ppu_mirror_vram_addr(PPU *ppu, unsigned short addr)
 {
     unsigned short  mirrored_vram = addr & 0b10111111111111,
                     vram_index = mirrored_vram - 0x2000,
-                    name_table = vram_index / 0x0400;
+                    name_table = vram_index / 0x400;
 
-    unsigned short value;
+    unsigned short value = vram_index;
 
     switch (ppu->mirroring)
     {
         case VERTICAL:
             if (name_table == 2 || name_table == 3)
-                value = vram_index - 0x0800;
-            else 
-                value = vram_index % 0x800;
+                value -= 0x800;
             break;
         case HORIZONTAL:
             if (name_table == 1 || name_table == 2) 
-                value = vram_index - 0x0400;
+                value -= 0x400;
             else if (name_table == 3)
-                value = vram_index - 0x0800;
-            else 
-                value = vram_index % 0x800;
+                value -= 0x800;
             break;
         case FOUR_SCREEN:
         default:
-            value = vram_index % 0x800;
             break;
     }
 
@@ -506,6 +986,8 @@ static unsigned char ppu_read_data(PPU *ppu)
     unsigned short addr = addr_get(ppu->addr);
     unsigned char data = 0;
 
+    ppu_increment_vram_addr(ppu);
+
     switch (addr)
     {
         case 0x0000 ... 0x1FFF:
@@ -513,14 +995,35 @@ static unsigned char ppu_read_data(PPU *ppu)
             ppu->internal_data_buf = ppu->chr_rom[addr];
             break;
         case 0x2000 ... 0x2FFF:
+        case 0x3000 ... 0x3EFF:
             data = ppu->internal_data_buf;
             ppu->internal_data_buf = ppu->vram[ppu_mirror_vram_addr(ppu, addr)];
             break;
-        case 0x3000 ... 0x3EFF:
-            break;
-        case 0x3F00 ... 0x3FFF:
+        case 0x3F00 ... 0x3F09:
+        case 0x3F11 ... 0x3F13:
+        case 0x3F15 ... 0x3F17:
+        case 0x3F19 ... 0x3F1B:
+        case 0x3F1D ... 0x3F1F:
             data = ppu->palette_table[addr - 0x3F00];
+            ppu->internal_data_buf = ppu->palette_table[addr - 0x3F00];
             break;
+        case 0x3F10:
+        case 0x3F14:
+        case 0x3F18:
+        case 0x3F1C:
+            data = ppu->palette_table[addr - 0x10 - 0x3F00];
+            ppu->internal_data_buf = ppu->palette_table[addr - 0x10 - 0x3F00];
+            break;
+        case 0x3F20 ... 0x3FFF:
+            data = ppu->palette_table[addr % 32];
+            ppu->internal_data_buf = ppu->palette_table[addr % 32];
+            break;
+        /*
+        case 0x3F00 ... 0x3FFF: // this is technically incorrect
+            data = ppu->palette_table[addr % 32];
+            ppu->internal_data_buf = ppu->palette_table[addr % 32];
+            break;
+        */
         default:
             break;
     }
@@ -535,35 +1038,38 @@ static void ppu_write_to_data(PPU *ppu, unsigned char data)
     switch (addr)
     {
         case 0x0000 ... 0x1FFF:
-            ppu->internal_data_buf = data;
-            ppu->chr_rom[addr] = ppu->internal_data_buf;
+            //write to RAM?
             break;
-        case 0x2000:
-        case 0x2001:
-        case 0x2002:
-        case 0x2003:
-        case 0x2004:
-            break;
-        case 0x2005:
-            
-            break;
-        case 0x2006:
-            break;
-        case 0x2007:
-            ppu->internal_data_buf = data;
-            ppu->vram[ppu_mirror_vram_addr(ppu, addr)] = ppu->internal_data_buf;
-            ppu_increment_vram_addr(ppu);
-            break;
-        case 0x2008 ... 0x2FFF:
-            break;
+        case 0x2000 ... 0x2FFF:
         case 0x3000 ... 0x3EFF:
+            ppu->vram[ppu_mirror_vram_addr(ppu, addr)] = data;
             break;
-        case 0x3F00 ... 0x3FFF:
+        case 0x3F00 ... 0x3F09:
+        case 0x3F11 ... 0x3F13:
+        case 0x3F15 ... 0x3F17:
+        case 0x3F19 ... 0x3F1B:
+        case 0x3F1D ... 0x3F1F:
             ppu->palette_table[addr - 0x3F00] = data;
             break;
+        case 0x3F10:
+        case 0x3F14:
+        case 0x3F18:
+        case 0x3F1C:
+            ppu->palette_table[addr - 0x10 - 0x3F00] = data;
+            break;
+        case 0x3F20 ... 0x3FFF:
+            ppu->palette_table[addr % 32] = data;
+            break;
+        /*
+        case 0x3F00 ... 0x3FFF: // this is technically incorrect
+            ppu->palette_table[addr % 32] = data;
+            break;
+        */
         default:
             break;
     }
+
+    ppu_increment_vram_addr(ppu);
 }
 
 static bool rom_load(Rom *rom, unsigned char data[])
@@ -576,13 +1082,12 @@ static bool rom_load(Rom *rom, unsigned char data[])
     }
 
     unsigned char ines_ver = (data[7] >> 2) & 0b11;
-
+    
     if (ines_ver != 0)
     {
-        printf("iNES2.0 format not supported!\n");
-        return false;
+        printf("iNES2.0 format not supported!\nRunning in compatability mode.\n");
     }
-
+    
     rom->mapper = (data[7] & 0b11110000) | (data[6] >> 4);
 
     if (data[6] & 0b1000)   rom->screen_mirroring = FOUR_SCREEN;
@@ -628,18 +1133,18 @@ static unsigned char rom_read_prg_rom(Bus *bus, unsigned short addr)
     return bus->rom.prg_rom[addr];
 }
 
-static void bus_tick(Emulator *emu, unsigned char cycles)
+static void bus_tick(Bus *bus, unsigned short cycles)
 {
-    emu->cpu.bus.cycles += cycles;
+    bus->cycles += cycles;
 
-    unsigned char nmi_before = emu->cpu.bus.ppu.nmi_interrupt;
+    unsigned char nmi_before = bus->ppu.nmi_interrupt;
 
-    ppu_tick(&emu->cpu.bus.ppu, cycles * 3);
+    ppu_tick(&bus->ppu, cycles * 3);
 
-    unsigned char nmi_after = emu->cpu.bus.ppu.nmi_interrupt;
+    unsigned char nmi_after = bus->ppu.nmi_interrupt;
 
     if (!nmi_before && nmi_after)
-        cpu_callback(emu);
+        cpu_callback(bus);
 }
 
 static void bus_free_rom(Rom *rom)
@@ -653,7 +1158,7 @@ static void bus_free_rom(Rom *rom)
 static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
 {
     unsigned char mem_addr = 0;
-    //printf("bus mem read addr:%X\n", addr);
+
     switch (addr)
     {
         case RAM ... RAM_MIRRORS_END:
@@ -665,7 +1170,14 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
         case 0x2005:
         case 0x2006:
         case 0x4014:
-            //printf("attempt to read from write-only PPU address:%X\n", addr);
+            //attempt to read from write-only PPU address
+            break;
+        case 0x4016:
+            // joypad1
+            mem_addr = joypad_read(&bus->joypad1);
+            break;
+        case 0x4018:
+            // joypad2
             break;
         case 0x2002:
             mem_addr = bus->ppu.status;
@@ -677,18 +1189,19 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
             mem_addr = bus->ppu.oam_data[bus->ppu.oam_addr];
             break;
         case 0x2007:
-            mem_addr = bus->ppu.internal_data_buf;
-            bus->ppu.internal_data_buf = bus->ppu.vram[ppu_mirror_vram_addr(&bus->ppu, addr_get(bus->ppu.addr))];
-            ppu_increment_vram_addr(&bus->ppu);
+            mem_addr = ppu_read_data(&bus->ppu);
             break;
         case 0x2008 ... PPU_REGISTERS_END:
             mem_addr = bus_mem_read(bus, addr & 0x2007);
+            break;
+        case 0x4015:
+            mem_addr = bus->apu.status;
             break;
         case 0x8000 ... 0xFFFF:
             mem_addr = rom_read_prg_rom(bus, addr);
             break;
         default: 
-            //printf("ignoring memory access:%X\n", addr);
+            // ignoring memory address
             break;
     }
 
@@ -697,84 +1210,143 @@ static unsigned char bus_mem_read(Bus *bus, unsigned short addr)
 
 static void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
 {
-    //printf("bus write data:%X address:%X\n", data, addr);
     switch (addr)
     {
         case RAM ... RAM_MIRRORS_END:
             bus->cpu_vram[addr & 0x7FF] = data;
             break;
         case PPU_REGISTERS:
-            ppu_write_to_ctrl(&bus->ppu, data);
-            bus->ppu.scroll.temp |= (unsigned short)((data & 0b11) << 10);
-            printf("0x2000 write data:%X t:%X\n", data, bus->ppu.scroll.temp);
+            //if (bus->cycles >= 29658)
+                ppu_write_to_ctrl(&bus->ppu, data);
             break;
         case 0x2001:
-            bus->ppu.mask = data;
+            //if (bus->cycles >= 29658)
+                bus->ppu.mask = data;
             break;
         case 0x2003:
             bus->ppu.oam_addr = data;
             break;
         case 0x2004:
-            bus->ppu.oam_data[bus->ppu.oam_addr] = data;
-            bus->ppu.oam_addr++;
+            //if (!(bus->ppu.scanline >= 0 && bus->ppu.scanline <= 239))
+            //{
+                bus->ppu.oam_data[bus->ppu.oam_addr] = data;
+                bus->ppu.oam_addr++;
+            //}
             break;
         case 0x2005:
-            if (!bus->ppu.scroll.toggle)
-            {
-                bus->ppu.scroll.temp |= (unsigned short)((data & 0b11111000) >> 3);
-                bus->ppu.scroll.fine_x = data & 0b111;
-                bus->ppu.scroll.toggle = true;
-                printf("0x2005 first write data:%X t:%X x:%X\n", data, bus->ppu.scroll.temp, bus->ppu.scroll.fine_x);
-            }
-            else 
-            {
-                bus->ppu.scroll.temp |= (unsigned short)((data & 0b11111000) << 9);
-                bus->ppu.scroll.temp |= (unsigned short)((data & 0b111) << 12);
-                bus->ppu.scroll.toggle = false;
-                printf("0x2005 second write data:%X t:%X\n", data, bus->ppu.scroll.temp);
-            }
+            //if (bus->cycles >= 29658)
+            //{
+                if (!bus->ppu.scroll.toggle)
+                    bus->ppu.scroll.x = data;
+                else 
+                    bus->ppu.scroll.y = data;
+                
+                bus->ppu.scroll.toggle = !bus->ppu.scroll.toggle;
+            //}
             break;
         case 0x2006:
-            ppu_write_to_ppu_addr(&bus->ppu, data);
-            if (!bus->ppu.scroll.toggle)
-            {
-                unsigned char a = data & 0b00111111;
-                bus->ppu.scroll.temp |= (unsigned short)(a << 8);
-                bus->ppu.scroll.temp &= 0b1011111111111111;
-                bus->ppu.scroll.toggle = true;
-                printf("0x2006 first write data:%X t:%X\n", data, bus->ppu.scroll.temp);
-            }
-            else
-            {
-                bus->ppu.scroll.temp |= (unsigned short)data;
-                bus->ppu.scroll.value = bus->ppu.scroll.temp;
-                bus->ppu.scroll.toggle = false;
-                printf("0x2006 second write data:%X t:%X value:%X\n", data, bus->ppu.scroll.temp, bus->ppu.scroll.value);
-            }
+            //if (bus->cycles >= 29658)
+            //{
+                ppu_write_to_ppu_addr(&bus->ppu, data);
+                bus->ppu.scroll.toggle = !bus->ppu.scroll.toggle;
+            //}
             break;
         case 0x2007:
-            bus->ppu.vram[ppu_mirror_vram_addr(&bus->ppu, addr_get(bus->ppu.addr))] = data;
-            ppu_increment_vram_addr(&bus->ppu);
+            ppu_write_to_data(&bus->ppu, data);
+            break;
+        case 0x4000:
+            // pulse 1 duty, env length/halt, constant volume, volume/env
+        case 0x4004:
+            // pulse 2 duty, env length/halt, constant volume, volume/env
+            break;
+        case 0x4001:
+            // pulse 1 sweep
+        case 0x4005:
+            // pulse 2 sweep
+            break;
+        case 0x4002:
+            // pulse 1 timer low
+        case 0x4006:
+            // pulse 2timer low
+            break;
+        case 0x4003:
+            // pulse 1 length counter, timer high
+        case 0x4007:
+            // pulse 2 length counter, timer high
+            break;
+        case 0x4008:
+            // triangle length counter halt / linear counter control, linear counter load
+            break;
+        //   0x4009 is unused!
+        case 0x400A:
+            // triangle timer low
+            break;
+        case 0x400B:
+            // triangle length counter load, timer high
+            break;
+        case 0x400C:
+            // noise env loop/length counter halt, constant vol, volume/env
+            break;
+        //   0x400D is unused!
+        case 0x400E:
+            // noise loop, period
+            break;
+        case 0x400F:
+            // noise length counter load
+
+            break;
+        case 0x4010:
+            // dmc irq enable, loop, freq
+            break;
+        case 0x4011:
+            // dmc load counter
+            break;
+        case 0x4012:
+            // dmc sample addr
+            break;
+        case 0x4013:
+            // dmc sample length
+            break;
+        case 0x4015:
+            bus->apu.status = data;
+            break;
+        case 0x4017:
+            bus->apu.ctr_register = data;
             break;
         case 0x4014:
-            unsigned char lo = 0x00;
-            unsigned short cpu_read_addr = (unsigned short)data << 8 | (unsigned short)lo;
+            //if (!(bus->ppu.scanline >= 0 && bus->ppu.scanline <= 239))
+            //{
+                unsigned short hi = (unsigned short)data << 8;
 
-            for (int i = 0; i < 256; i++)
-            {
-                bus_mem_write(bus, 0x2004, bus_mem_read(bus, cpu_read_addr));
-                lo++;
-            }
+                for (int i = 0; i < 256; i++)
+                {
+                    bus->ppu.oam_data[bus->ppu.oam_addr] = bus_mem_read(bus, hi + i);
+                    bus->ppu.oam_addr++;
+                }
+
+                unsigned short cycles = 513;
+
+                if (bus->cycles % 2 == 1) cycles += 1;
+
+                bus_tick(bus, cycles);
+            //}
+            break;
+        case 0x4016:
+            // joypad1
+            joypad_write(&bus->joypad1, data);
+            break;
+        case 0x4018:
+            // joypad2
             break;
         case 0x2008 ... PPU_REGISTERS_END:
             bus_mem_write(bus, addr & 0x2007, data);
             break;
         case 0x8000 ... 0xFFFF:
-            //printf("Attempt to write to cartridge ROM space!\n");
+            // Attempt to write to cartridge ROM space!
             break;
         default: 
         case 0x2002:
-            //printf("ignoring memory write-access:%X\n", addr);
+            // ignoring memory write-access
             break;
     }
 }
@@ -890,7 +1462,7 @@ static void rom_reset(Rom *rom)
     rom->prg_len = 0;
 }
 
-static void cpu_interrupt_nmi(Emulator *emu, CPU *cpu)
+static void cpu_interrupt_nmi(CPU *cpu)
 {
     cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer - 1, cpu->program_counter);
     cpu->stack_pointer -= 2;
@@ -905,7 +1477,8 @@ static void cpu_interrupt_nmi(Emulator *emu, CPU *cpu)
 
     cpu->status |= Interrupt_Disable_Flag;
 
-    bus_tick(emu, 2);
+    cpu->cycles += 2;
+    bus_tick(&cpu->bus, 2);
 
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFA);
 }
@@ -914,18 +1487,18 @@ static void cpu_init(CPU *cpu)
 {
     int i = 0;
 
-    for (; i < 65535; i++)
-        cpu->memory[i] = 0;
+    //for (; i < 65535; i++)
+    //    cpu->memory[i] = 0;
 
     for (i = 0; i < 2048; i++)
         cpu->bus.cpu_vram[i] = 0;
 
-    memcpy(&cpu->memory[0x8000], cpu->bus.rom.prg_rom, cpu->bus.rom.prg_len);
+    //memcpy(&cpu->memory[0x8000], cpu->bus.rom.prg_rom, cpu->bus.rom.prg_len);
 
     cpu->register_a = 0;
     cpu->register_x = 0;
     cpu->register_y = 0;
-    cpu->status = 34;
+    cpu->status = 0x24;
     cpu->stack_pointer = 0xFD;     
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFC);
                                    //   ... should be the standard 
@@ -933,8 +1506,6 @@ static void cpu_init(CPU *cpu)
     cpu->cycles = 0;
     cpu->bus.cycles = 0;
     cpu->bus.prg_rom = cpu->bus.rom.prg_rom;
-
-    cpu->quit = false;
 }
 
 static void cpu_reset(CPU *cpu)
@@ -1878,11 +2449,11 @@ static void cpu_dey(CPU *cpu)
 static void cpu_brk(CPU *cpu)
 {
     // fix this(?)
-    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer - 1, cpu->program_counter);
+    cpu_mem_write_u16(cpu, 0x0100 + cpu->stack_pointer - 1, cpu->program_counter + 1);
     cpu->stack_pointer -= 2;
+    cpu->status |= Break_Command_Flag;
     cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, cpu->status);
     cpu->stack_pointer -= 1;
-    cpu->status |= Break_Command_Flag;
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFE);
 }
 
@@ -2137,8 +2708,8 @@ static void cpu_pha(CPU *cpu)
 static void cpu_php(CPU *cpu)
 {
     unsigned char p = cpu->status;
-    p = p | Break_Command_Flag;
-    p = p | Unused_Flag;
+    p |= Break_Command_Flag;
+    p |= Unused_Flag;
     cpu_mem_write(&cpu->bus, 0x0100 + cpu->stack_pointer, p);
     cpu->stack_pointer -= 1;
 }
@@ -2317,7 +2888,6 @@ static void cpu_lsr(CPU *cpu, enum AddressingMode mode)
 
 static void cpu_rti(CPU *cpu)
 {
-    // pull status followed by counter
     cpu->stack_pointer += 1;
     cpu->status = Unused_Flag;
     cpu->status |= cpu_mem_read(&cpu->bus, 0x0100 + cpu->stack_pointer);
@@ -2338,45 +2908,17 @@ static void cpu_jsr(CPU *cpu)
     cpu->program_counter = cpu_get_operand_address(cpu, Absolute);
 }
 
-static void cpu_test(CPU *cpu)
+static void cpu_interpret(CPU *cpu)
 {
-    FILE *f;
-
-    if (!(f = fopen("mytest.log", "w")))
+    if (cpu->bus.ppu.nmi_interrupt && !cpu->bus.ppu.nmi_write)
     {
-        printf("could not open log file!\n");
-        return;
-    }
-    
-    int test_counter = 1;
-
-    unsigned char   opscode = cpu_mem_read(&cpu->bus, cpu->program_counter),
-                    val1 = cpu_mem_read(&cpu->bus, cpu->program_counter + 1),
-                    val2 = cpu_mem_read(&cpu->bus, cpu->program_counter + 2);
-
-    while (test_counter < 8992)
-    {
-        fprintf(
-            f, 
-            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU: %d,%d CYC:%d\n",
-            cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
-            cpu->register_y, cpu->status, cpu->stack_pointer, cpu->bus.ppu.scanline, cpu->bus.ppu.cycles, cpu->cycles);
-
-        test_counter++;
+        cpu_interrupt_nmi(cpu);
+        cpu->bus.ppu.nmi_write = true;
     }
 
-    fclose(f);
-}
-
-static void cpu_interpret(Emulator *emu, CPU *cpu)
-{
-    
-    unsigned char   program_counter_state = 0,
+    unsigned char   //program_counter_state = 0,
                     opcode_cycles = 0,
                     opscode = cpu_mem_read(&cpu->bus, cpu->program_counter);
-
-    if (cpu->bus.ppu.nmi_interrupt)
-        cpu_interrupt_nmi(emu, cpu);
 
     /*
     printf( 
@@ -2408,7 +2950,7 @@ static void cpu_interpret(Emulator *emu, CPU *cpu)
         case 0xD2:
         case 0xF2:
             cpu_kil(cpu);
-            cpu->quit = true;
+            printf("cpu kill\n");
             return;
 
         case 0x40: 
@@ -3785,10 +4327,44 @@ static void cpu_interpret(Emulator *emu, CPU *cpu)
             break;
     }
 
-    bus_tick(emu, opcode_cycles);
+    bus_tick(&cpu->bus, opcode_cycles);
 
     //if (program_counter_state == cpu->program_counter)
     //    cpu->program_counter += (unsigned short)opscode - 1;
+}
+
+static void cpu_test(Emulator *emu)
+{
+    FILE *f;
+
+    if (!(f = fopen("mytest.log", "w")))
+    {
+        printf("could not open log file!\n");
+        return;
+    }
+
+    CPU *cpu = &emu->cpu;
+    
+    int test_counter = 1;
+
+    while (test_counter < 8992)
+    {
+        unsigned char   opscode = cpu_mem_read(&cpu->bus, cpu->program_counter),
+                        val1 = cpu_mem_read(&cpu->bus, cpu->program_counter + 1),
+                        val2 = cpu_mem_read(&cpu->bus, cpu->program_counter + 2);
+
+        fprintf(
+            f, 
+            "%X  %X %X %X                                   A:%X X:%X Y:%X P:%X SP:%X PPU: %d,%d CYC:%d\n",
+            cpu->program_counter, opscode, val1, val2, cpu->register_a, cpu->register_x,
+            cpu->register_y, cpu->status, cpu->stack_pointer, cpu->bus.ppu.scanline, cpu->bus.ppu.cycles, cpu->cycles);
+
+        cpu_interpret(cpu);
+
+        test_counter++;
+    }
+
+    fclose(f);
 }
 
 static void e_file_handler(unsigned char *buffer, int len)
@@ -3821,42 +4397,27 @@ static void test_format_mem_access(const char *filename)
 
     fclose(f);
     
-    CPU cpu;
+    Emulator emu;
 
     printf("reset rom\n");
-    rom_init(&cpu.bus.rom);
+    rom_init(&emu.cpu.bus.rom);
 
     printf("rom load\n");
-    if (!rom_load(&cpu.bus.rom, file_buffer))
+    if (!rom_load(&emu.cpu.bus.rom, file_buffer))
     {
         printf("Could not load file buffer!\n");
         return;
     }
 
     printf("reset cpu\n");
-    cpu_init(&cpu);
-    ppu_load(&cpu.bus.ppu, cpu.bus.rom.chr_rom, cpu.bus.rom.screen_mirroring);
-    addr_reset(&cpu.bus.ppu.addr);
-    
-    /*
-    bus_mem_write(&cpu.bus, 100, 0x11);
-    bus_mem_write(&cpu.bus, 101, 0x33);
+    cpu_init(&emu.cpu);
+    ppu_load(&emu.cpu.bus.ppu, emu.cpu.bus.rom.chr_rom, emu.cpu.bus.rom.screen_mirroring);
+    addr_reset(&emu.cpu.bus.ppu.addr);
 
-    bus_mem_write(&cpu.bus, 0x33, 00);
-    bus_mem_write(&cpu.bus ,0x34, 04);
-
-    bus_mem_write(&cpu.bus, 0x400, 0xAA);
-
-    cpu.program_counter = 64;
-    cpu.register_y = 0;
-
-    printf("0064  11 33     ORA ($33),Y = 0400 @ 0400 = AA  A:00 X:00 Y:00 P:24 SP:FD");
-    */
-
-    //cpu_interpret(&cpu);
+    cpu_test(&emu);
 
     printf("free file buffer\n");
     free(file_buffer);
 
-    bus_free_rom(&cpu.bus.rom);
+    bus_free_rom(&emu.cpu.bus.rom);
 }
