@@ -1,6 +1,3 @@
-//#include "SDL_FontCache.h"
-//#include <SDL2/SDL.h>
-
 #include <gtk/gtk.h>
 #include "emu.h"
 

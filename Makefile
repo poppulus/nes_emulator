@@ -20,11 +20,11 @@ CC = gcc
 
 #COMPILER_FLAGS specifies the additional compilation options we're using
 #
-COMPILER_FLAGS = `pkg-config --cflags gtk4` -Wall -g 
+COMPILER_FLAGS = -Wall -g `pkg-config --cflags gtk4`
 
 #LINKER_FLAGS specifies the libraries we're linking against
-# -lSDL2 -lSDL2_ttf -lSDL2_mixer -lSDL2_net gtk+-3.0
-LINKER_FLAGS = `pkg-config --libs gtk4` 
+# -lSDL2_mixer gtk+-3.0
+LINKER_FLAGS = `pkg-config --libs gtk4` -lSDL2
 
 #OBJ_NAME specifies the name of our exectuable
 OBJ_NAME = main
