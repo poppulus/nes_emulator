@@ -1,8 +1,10 @@
-#include <SDL2/SDL.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
 #include <stdbool.h>
+
+typedef unsigned char uint8_t;
+typedef unsigned short uint16_t;
 
 #define PRG_ROM_PAGE_SIZE   0x4000
 #define CHR_ROM_PAGE_SIZE   0x2000
@@ -135,13 +137,70 @@ enum SweepRegister
     ENABLED         = 0b10000000
 };
 
-typedef struct Pulse_Wave
+typedef struct Pulse
 {
     enum SweepRegister sweep;
 
     unsigned char   timer_low, 
                     timer_high;
-} Pulse_Wave;
+
+    unsigned short  timer_period;
+
+    unsigned char   envelope;
+
+    unsigned char   length_counter;
+
+    unsigned char   output;
+
+    bool            length_halt_flag:1, const_vol_env_flag:1;
+} Pulse;
+
+typedef struct Triangle
+{
+    unsigned char   timer_low, 
+                    timer_high;
+
+    unsigned short  timer_period;
+
+    unsigned char   length_counter,
+                    linear_counter;
+
+    unsigned char   output;
+
+    bool            length_halt:1;
+} Triangle;
+
+typedef struct Noise
+{
+    unsigned char   timer_low, 
+                    timer_high;
+
+    unsigned char   envelope, period;
+
+    unsigned char   length_counter,
+                    linear_shift;
+
+    unsigned char   output;
+
+    bool            length_halt:1, constant:1, mode:1;
+} Noise;
+
+typedef struct DMC
+{
+    unsigned char   timer_low, 
+                    timer_high;
+
+    unsigned char   memory_reader, 
+                    sample_buffer,
+                    output_unit, 
+                    rate;
+
+    unsigned char   output;
+
+    unsigned short  sample_addr, sample_length;
+
+    bool            loop:1;
+} DMC;
 
 typedef struct Joypad
 {
@@ -177,35 +236,6 @@ typedef struct ScrollRegister
     bool            toggle:1;
 } ScrollRegister;
 
-typedef struct SdlRelated
-{
-    SDL_Window      *w;
-    SDL_Renderer    *r;
-    SDL_Texture     *t;
-    Frame           frame;
-    SDL_Event       e;
-} SdlRelated;
-
-typedef struct PulseChannel
-{
-    unsigned length_counter;
-} Pulse;
-
-typedef struct TriangleChannel
-{
-    unsigned length_counter;
-} Triangle;
-
-typedef struct NoiseChannel
-{
-    unsigned length_counter;
-} Noise;
-
-typedef struct SampleChannel
-{
-
-} Sample;
-
 typedef struct AudioProcessingUnit
 {
     enum AudioStatusRegister status;
@@ -214,7 +244,7 @@ typedef struct AudioProcessingUnit
     Pulse       pulse1, pulse2;
     Triangle    triangle;
     Noise       noise;
-    Sample      dmc;
+    DMC         dmc;
 } APU;
 
 typedef struct PPU
@@ -262,7 +292,6 @@ typedef struct Bus
     Rom rom;
     PPU ppu;
     APU apu;
-    SdlRelated *sdl_related;
 } Bus;
 
 typedef struct CPU
@@ -271,7 +300,6 @@ typedef struct CPU
                             register_x, 
                             register_y,
                             stack_pointer;
-                            //memory[0xFFFF];
 
     enum ProcessorStatus    status;
 
@@ -281,12 +309,11 @@ typedef struct CPU
     Bus                     bus;
 } CPU;
 
-typedef struct Emulator
-{
-    SdlRelated      sdl_related;
-    CPU             cpu;
-    bool            quit:1;
-} Emulator;
+void apu_pulse_set_duty(Pulse *pulse, uint8_t data);
+void apu_pulse_set_counter_hi_timer(Pulse *pulse, uint8_t data);
+void apu_pulse_set_sweep(Pulse *pulse, uint8_t data);
+
+void apu_triangle_set_counter_hi_timer(Triangle *triangle, uint8_t data);
 
 
 void joypad_init(Joypad *joypad);
@@ -300,15 +327,15 @@ Palette bg_palette(PPU *ppu, uint8_t *attr_table, uint8_t tile_column, uint8_t t
 Palette ppu_sprite_palette(PPU *ppu, uint8_t palette_idx);
 
 void ppu_render_name_table(PPU *ppu, 
-                                Frame *frame, 
-                                uint8_t *name_table, 
-                                Rect viewport, 
-                                short shift_x, 
-                                short shift_y);
+                            Frame *frame, 
+                            uint8_t *name_table, 
+                            Rect viewport, 
+                            short shift_x, 
+                            short shift_y);
 
 void ppu_render(PPU *ppu, Frame *frame);
 
-void cpu_callback(Bus *bus);
+extern void cpu_callback(Bus *bus);
 
 uint8_t vram_addr_increment(enum PPUControlRegister ctrl);
 
@@ -437,7 +464,7 @@ void cpu_jsr(CPU *cpu);
 
 void cpu_interpret(CPU *cpu);
 
-void cpu_test(Emulator *emu);
+void cpu_test(CPU *cpu);
 
 void e_file_handler(unsigned char *buffer, int len);
 

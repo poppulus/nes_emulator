@@ -1,20 +1,221 @@
 #include "emu.h"
 
 uint8_t NES_PALETTE[192] = {
-    0x80, 0x80, 0x80, 0x00, 0x3D, 0xA6, 0x00, 0x12, 0xB0, 0x44, 0x00, 0x96, 0xA1, 0x00, 0x5E,
-    0xC7, 0x00, 0x28, 0xBA, 0x06, 0x00, 0x8C, 0x17, 0x00, 0x5C, 0x2F, 0x00, 0x10, 0x45, 0x00,
-    0x05, 0x4A, 0x00, 0x00, 0x47, 0x2E, 0x00, 0x41, 0x66, 0x00, 0x00, 0x00, 0x05, 0x05, 0x05,
-    0x05, 0x05, 0x05, 0xC7, 0xC7, 0xC7, 0x00, 0x77, 0xFF, 0x21, 0x55, 0xFF, 0x82, 0x37, 0xFA,
-    0xEB, 0x2F, 0xB5, 0xFF, 0x29, 0x50, 0xFF, 0x22, 0x00, 0xD6, 0x32, 0x00, 0xC4, 0x62, 0x00,
-    0x35, 0x80, 0x00, 0x05, 0x8F, 0x00, 0x00, 0x8A, 0x55, 0x00, 0x99, 0xCC, 0x21, 0x21, 0x21,
-    0x09, 0x09, 0x09, 0x09, 0x09, 0x09, 0xFF, 0xFF, 0xFF, 0x0F, 0xD7, 0xFF, 0x69, 0xA2, 0xFF,
-    0xD4, 0x80, 0xFF, 0xFF, 0x45, 0xF3, 0xFF, 0x61, 0x8B, 0xFF, 0x88, 0x33, 0xFF, 0x9C, 0x12,
-    0xFA, 0xBC, 0x20, 0x9F, 0xE3, 0x0E, 0x2B, 0xF0, 0x35, 0x0C, 0xF0, 0xA4, 0x05, 0xFB, 0xFF,
-    0x5E, 0x5E, 0x5E, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0x0D, 0xFF, 0xFF, 0xFF, 0xA6, 0xFC, 0xFF,
-    0xB3, 0xEC, 0xFF, 0xDA, 0xAB, 0xEB, 0xFF, 0xA8, 0xF9, 0xFF, 0xAB, 0xB3, 0xFF, 0xD2, 0xB0,
-    0xFF, 0xEF, 0xA6, 0xFF, 0xF7, 0x9C, 0xD7, 0xE8, 0x95, 0xA6, 0xED, 0xAF, 0xA2, 0xF2, 0xDA,
-    0x99, 0xFF, 0xFC, 0xDD, 0xDD, 0xDD, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11
+    0x80,0x80,0x80, 0x00,0x3D,0xA6, 0x00,0x12,0xB0, 0x44,0x00,0x96, 0xA1,0x00,0x5E,
+    0xC7,0x00,0x28, 0xBA,0x06,0x00, 0x8C,0x17,0x00, 0x5C,0x2F,0x00, 0x10,0x45,0x00,
+    0x05,0x4A,0x00, 0x00,0x47,0x2E, 0x00,0x41,0x66, 0x00,0x00,0x00, 0x05,0x05,0x05,
+    0x05,0x05,0x05, 0xC7,0xC7,0xC7, 0x00,0x77,0xFF, 0x21,0x55,0xFF, 0x82,0x37,0xFA,
+    0xEB,0x2F,0xB5, 0xFF,0x29,0x50, 0xFF,0x22,0x00, 0xD6,0x32,0x00, 0xC4,0x62,0x00,
+    0x35,0x80,0x00, 0x05,0x8F,0x00, 0x00,0x8A,0x55, 0x00,0x99,0xCC, 0x21,0x21,0x21,
+    0x09,0x09,0x09, 0x09,0x09,0x09, 0xFF,0xFF,0xFF, 0x0F,0xD7,0xFF, 0x69,0xA2,0xFF,
+    0xD4,0x80,0xFF, 0xFF,0x45,0xF3, 0xFF,0x61,0x8B, 0xFF,0x88,0x33, 0xFF,0x9C,0x12,
+    0xFA,0xBC,0x20, 0x9F,0xE3,0x0E, 0x2B,0xF0,0x35, 0x0C,0xF0,0xA4, 0x05,0xFB,0xFF,
+    0x5E,0x5E,0x5E, 0x0D,0x0D,0x0D, 0x0D,0x0D,0x0D, 0xFF,0xFF,0xFF, 0xA6,0xFC,0xFF,
+    0xB3,0xEC,0xFF, 0xDA,0xAB,0xEB, 0xFF,0xA8,0xF9, 0xFF,0xAB,0xB3, 0xFF,0xD2,0xB0,
+    0xFF,0xEF,0xA6, 0xFF,0xF7,0x9C, 0xD7,0xE8,0x95, 0xA6,0xED,0xAF, 0xA2,0xF2,0xDA,
+    0x99,0xFF,0xFC, 0xDD,0xDD,0xDD, 0x11,0x11,0x11, 0x11,0x11,0x11
 };
+
+void apu_pulse_set_duty(Pulse *pulse, uint8_t data)
+{
+    switch (data >> 6)
+    {
+        default:
+            // can not happen
+            break;
+        case 0:
+            pulse->output = 0b01000000;
+            break;
+        case 1:
+            pulse->output = 0b01100000;
+            break;
+        case 2:
+            pulse->output = 0b01111000;
+            break;
+        case 3:
+            pulse->output = 0b10011111;
+            break;
+    }
+
+    pulse->length_halt_flag = data & 0b00100000 ? true : false;
+    pulse->const_vol_env_flag = data & 0b00010000 ? true : false;
+}
+
+void apu_pulse_set_counter_hi_timer(Pulse *pulse, uint8_t data)
+{
+    unsigned char counter = (data >> 3) & 0x1F;
+    switch (counter)
+    {
+        default:
+            // should never be
+            break;
+        // Linear length values:
+        case 0x01:
+            pulse->length_counter = 254;
+            break;
+        case 0x03:
+        case 0x05:
+        case 0x07:
+        case 0x09:
+        case 0x0B:
+        case 0x0D:
+        case 0x0F:
+        case 0x11:
+        case 0x13:
+        case 0x15:
+        case 0x17:
+        case 0x19:
+        case 0x1B:
+        case 0x1D:
+        case 0x1F:
+            pulse->length_counter = counter - 1;
+            break;
+        // Notes with base length 12 (4/4 at 75 bpm):
+        case 0x10:
+            pulse->length_counter = 12;
+            break;
+        case 0x12:
+            pulse->length_counter = 24;
+            break;
+        case 0x14:
+            pulse->length_counter = 48;
+            break;
+        case 0x16:
+            pulse->length_counter = 96;
+            break;
+        case 0x18:
+            pulse->length_counter = 192;
+            break;
+        case 0x1A:
+            pulse->length_counter = 72;
+            break;
+        case 0x1C:
+            pulse->length_counter = 16;
+            break;
+        case 0x1E:
+            pulse->length_counter = 32;
+            break;
+        // Notes with base length 10 (4/4 at 90 bpm, with relative durations being the same as above):
+        case 0x00:
+            pulse->length_counter = 10;
+            break;
+        case 0x02:
+            pulse->length_counter = 20;
+            break;
+        case 0x04:
+            pulse->length_counter = 40;
+            break;
+        case 0x06:
+            pulse->length_counter = 80;
+            break;
+        case 0x08:
+            pulse->length_counter = 160;
+            break;
+        case 0x0A:
+            pulse->length_counter = 60;
+            break;
+        case 0x0C:
+            pulse->length_counter = 14;
+            break;
+        case 0x0E:
+            pulse->length_counter = 26;
+            break;
+    }
+    pulse->timer_high = data & 0b111;
+    pulse->timer_period = pulse->timer_low;
+    pulse->timer_period |= (unsigned short)pulse->timer_high << 8;
+}
+
+void apu_pulse_set_sweep(Pulse *pulse, uint8_t data)
+{
+    pulse->sweep = data;
+    pulse->timer_period >>= (data & 0b111);
+}
+
+void apu_triangle_set_counter_hi_timer(Triangle *triangle, uint8_t data)
+{
+    unsigned char counter = (data >> 3) & 0x1F;
+    switch (counter)
+    {
+        default:
+            // should never be
+            break;
+        // Linear length values:
+        case 0x01:
+            triangle->length_counter = 254;
+            break;
+        case 0x03:
+        case 0x05:
+        case 0x07:
+        case 0x09:
+        case 0x0B:
+        case 0x0D:
+        case 0x0F:
+        case 0x11:
+        case 0x13:
+        case 0x15:
+        case 0x17:
+        case 0x19:
+        case 0x1B:
+        case 0x1D:
+        case 0x1F:
+            triangle->length_counter = counter - 1;
+            break;
+        // Notes with base length 12 (4/4 at 75 bpm):
+        case 0x10:
+            triangle->length_counter = 12;
+            break;
+        case 0x12:
+            triangle->length_counter = 24;
+            break;
+        case 0x14:
+            triangle->length_counter = 48;
+            break;
+        case 0x16:
+            triangle->length_counter = 96;
+            break;
+        case 0x18:
+            triangle->length_counter = 192;
+            break;
+        case 0x1A:
+            triangle->length_counter = 72;
+            break;
+        case 0x1C:
+            triangle->length_counter = 16;
+            break;
+        case 0x1E:
+            triangle->length_counter = 32;
+            break;
+        // Notes with base length 10 (4/4 at 90 bpm, with relative durations being the same as above):
+        case 0x00:
+            triangle->length_counter = 10;
+            break;
+        case 0x02:
+            triangle->length_counter = 20;
+            break;
+        case 0x04:
+            triangle->length_counter = 40;
+            break;
+        case 0x06:
+            triangle->length_counter = 80;
+            break;
+        case 0x08:
+            triangle->length_counter = 160;
+            break;
+        case 0x0A:
+            triangle->length_counter = 60;
+            break;
+        case 0x0C:
+            triangle->length_counter = 14;
+            break;
+        case 0x0E:
+            triangle->length_counter = 26;
+            break;
+    }
+    triangle->timer_high = data & 0b111;
+    triangle->timer_period = triangle->timer_low;
+    triangle->timer_period |= (unsigned short)triangle->timer_high << 8;
+}
 
 void joypad_init(Joypad *joypad)
 {
@@ -25,7 +226,7 @@ void joypad_init(Joypad *joypad)
 
 void joypad_write(Joypad *joypad, unsigned char data)
 {
-    joypad->strobe = data & 1;
+    joypad->strobe = (data & 1) == 1;
 
     if (joypad->strobe)
         joypad->index = 0;
@@ -131,9 +332,8 @@ void ppu_render_name_table(
 
     for (int i = 0; i < 0x3C0; i++)
     {
-        unsigned short  tile_idx = name_table[i];
-
-        unsigned char   tile_column = i % 32,
+        unsigned char   tile_idx = name_table[i], 
+                        tile_column = i % 32,
                         tile_row = i / 32,
                         *tile = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
 
@@ -156,16 +356,16 @@ void ppu_render_name_table(
                 switch (value)
                 {
                     case 0:
-                        rgb = &NES_PALETTE[palette.p1];
+                        rgb = &NES_PALETTE[palette.p1 * 3];
                         break;
                     case 1:
-                        rgb = &NES_PALETTE[palette.p2];
+                        rgb = &NES_PALETTE[palette.p2 * 3];
                         break;
                     case 2:
-                        rgb = &NES_PALETTE[palette.p3];
+                        rgb = &NES_PALETTE[palette.p3 * 3];
                         break;
                     case 3:
-                        rgb = &NES_PALETTE[palette.p4];
+                        rgb = &NES_PALETTE[palette.p4 * 3];
                         break;
                     default: 
                         // should not be
@@ -329,13 +529,13 @@ void ppu_render(PPU *ppu, Frame *frame)
                     case 0:
                         continue;
                     case 1:
-                        rgb = &NES_PALETTE[sprite_palette.p2];
+                        rgb = &NES_PALETTE[sprite_palette.p2 * 3];
                         break;
                     case 2:
-                        rgb = &NES_PALETTE[sprite_palette.p3];
+                        rgb = &NES_PALETTE[sprite_palette.p3 * 3];
                         break;
                     case 3:
-                        rgb = &NES_PALETTE[sprite_palette.p4];
+                        rgb = &NES_PALETTE[sprite_palette.p4 * 3];
                         break;
                 }
 
@@ -370,101 +570,6 @@ void ppu_render(PPU *ppu, Frame *frame)
                                 rgb);
                         break;
                 }
-            }
-        }
-    }
-}
-
-void cpu_callback(Bus *bus)
-{
-    unsigned char *pixels;
-    int pitch;
-
-    ppu_render(&bus->ppu, &bus->sdl_related->frame);
-
-    SDL_LockTexture(bus->sdl_related->t, NULL, (void**)&pixels, &pitch);
-    memcpy(pixels, bus->sdl_related->frame.data, FRAME_LENGTH);
-    SDL_UnlockTexture(bus->sdl_related->t);
-
-    SDL_RenderClear(bus->sdl_related->r);
-    SDL_RenderCopy(bus->sdl_related->r, bus->sdl_related->t, NULL, NULL);
-    SDL_RenderPresent(bus->sdl_related->r);
-
-    while (SDL_PollEvent(&bus->sdl_related->e))
-    {
-        if (bus->sdl_related->e.type == SDL_KEYDOWN)
-        {
-            if (!bus->sdl_related->e.key.repeat)
-            {
-                switch (bus->sdl_related->e.key.keysym.sym)
-                {
-                    case SDLK_d:
-                        if (bus->joypad1.button_status & LEFT)
-                            bus->joypad1.button_status &= 0b10111111;
-
-                        bus->joypad1.button_status |= RIGHT;
-                        break;
-                    case SDLK_a:
-                        if (bus->joypad1.button_status & RIGHT)
-                            bus->joypad1.button_status &= 0b01111111;
-
-                        bus->joypad1.button_status |= LEFT;
-                        break;
-                    case SDLK_s:
-                        if (bus->joypad1.button_status & UP)
-                            bus->joypad1.button_status &= 0b11101111;
-
-                        bus->joypad1.button_status |= DOWN;
-                        break;
-                    case SDLK_w:
-                        if (bus->joypad1.button_status & DOWN)
-                            bus->joypad1.button_status &= 0b11011111;
-
-                        bus->joypad1.button_status |= UP;
-                        break;
-                    case SDLK_RETURN:
-                        bus->joypad1.button_status |= START;
-                        break;
-                    case SDLK_RSHIFT:
-                        bus->joypad1.button_status |= SELECT;
-                        break;
-                    case SDLK_COMMA:
-                        bus->joypad1.button_status |= B;
-                        break;
-                    case SDLK_PERIOD:
-                        bus->joypad1.button_status |= A;
-                        break;
-                }
-            }
-        }
-        else if (bus->sdl_related->e.type == SDL_KEYUP)
-        {
-            switch (bus->sdl_related->e.key.keysym.sym)
-            {
-                case SDLK_d:
-                    bus->joypad1.button_status &= 0b01111111;
-                    break;
-                case SDLK_a:
-                    bus->joypad1.button_status &= 0b10111111;
-                    break;
-                case SDLK_s:
-                    bus->joypad1.button_status &= 0b11011111;
-                    break;
-                case SDLK_w:
-                    bus->joypad1.button_status &= 0b11101111;
-                    break;
-                case SDLK_RETURN:
-                    bus->joypad1.button_status &= 0b11110111;
-                    break;
-                case SDLK_RSHIFT:
-                    bus->joypad1.button_status &= 0b11111011;
-                    break;
-                case SDLK_COMMA:
-                    bus->joypad1.button_status &= 0b11111101;
-                    break;
-                case SDLK_PERIOD:
-                    bus->joypad1.button_status &= 0b11111110;
-                    break;
             }
         }
     }
@@ -861,7 +966,7 @@ unsigned char bus_mem_read(Bus *bus, unsigned short addr)
             break;
         case 0x4017:
             // joypad2
-            mem_addr = joypad_read(&bus->joypad2);
+            //mem_addr = joypad_read(&bus->joypad2);
             break;
         case 0x2002:
             mem_addr = bus->ppu.status;
@@ -940,55 +1045,87 @@ void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
             break;
         case 0x4000:
             // pulse 1 duty, env length/halt, constant volume, volume/env
+            apu_pulse_set_duty(&bus->apu.pulse1, data);
         case 0x4004:
             // pulse 2 duty, env length/halt, constant volume, volume/env
+            apu_pulse_set_duty(&bus->apu.pulse2, data);
             break;
         case 0x4001:
             // pulse 1 sweep
+            apu_pulse_set_sweep(&bus->apu.pulse1, data);
         case 0x4005:
             // pulse 2 sweep
+            apu_pulse_set_sweep(&bus->apu.pulse2, data);
             break;
         case 0x4002:
             // pulse 1 timer low
+            bus->apu.pulse1.timer_low = data;
+            bus->apu.pulse1.timer_period = bus->apu.pulse1.timer_low;
+            bus->apu.pulse1.timer_period |= (unsigned short)bus->apu.pulse1.timer_high << 8;
         case 0x4006:
-            // pulse 2timer low
+            // pulse 2 timer low
+            bus->apu.pulse2.timer_low = data;
+            bus->apu.pulse2.timer_period = bus->apu.pulse2.timer_low;
+            bus->apu.pulse2.timer_period |= (unsigned short)bus->apu.pulse2.timer_high << 8;
             break;
         case 0x4003:
-            // pulse 1 length counter, timer high
+            apu_pulse_set_counter_hi_timer(&bus->apu.pulse1, data);
         case 0x4007:
-            // pulse 2 length counter, timer high
+            apu_pulse_set_counter_hi_timer(&bus->apu.pulse2, data);
             break;
         case 0x4008:
             // triangle length counter halt / linear counter control, linear counter load
+            bus->apu.triangle.length_halt = data & 0b10000000 ? true : false;
+            bus->apu.triangle.linear_counter = data & 0b0111111;
             break;
         //   0x4009 is unused!
         case 0x400A:
             // triangle timer low
+            bus->apu.triangle.timer_low = data;
+            bus->apu.triangle.timer_period = bus->apu.triangle.timer_low;
+            bus->apu.triangle.timer_period |= (unsigned short)bus->apu.triangle.timer_high << 8;
             break;
         case 0x400B:
             // triangle length counter load, timer high
+            apu_triangle_set_counter_hi_timer(&bus->apu.triangle, data);
+            bus->apu.triangle.length_halt = true;
             break;
         case 0x400C:
             // noise env loop/length counter halt, constant vol, volume/env
+            bus->apu.noise.length_halt = data & 0b00100000;
+            bus->apu.noise.constant = data & 0b00010000;
+            bus->apu.noise.envelope = data & 0x0F;
             break;
         //   0x400D is unused!
         case 0x400E:
             // noise loop, period
+            bus->apu.noise.mode = data & 0b10000000 ? true : false;
+            bus->apu.noise.period = data & 0x0F;
             break;
         case 0x400F:
             // noise length counter load
+            bus->apu.noise.length_counter = data >> 3;
             break;
         case 0x4010:
             // dmc irq enable, loop, freq
+
+            //if (!(data & 0b10000000))
+                // IRQ, should clear interrupt flag
+
+            bus->apu.dmc.loop = data & 0b01000000 ? true : false;
+            bus->apu.dmc.rate = data & 0x0F;
             break;
         case 0x4011:
             // dmc load counter
+            bus->apu.dmc.output = data & 0b01111111;
             break;
         case 0x4012:
             // dmc sample addr
+            bus->apu.dmc.sample_addr = 0xC000 | (unsigned short)data << 6;
             break;
         case 0x4013:
             // dmc sample length
+            bus->apu.dmc.sample_length = (unsigned short)data << 4 | 1;
             break;
         case 0x4015:
             bus->apu.status = data;
@@ -1015,7 +1152,7 @@ void bus_mem_write(Bus *bus, unsigned short addr, unsigned char data)
             //}
             break;
         case 0x4016:
-            // joypad1
+            // joypad write
             joypad_write(&bus->joypad1, data);
             break;
         case 0x2008 ... PPU_REGISTERS_END:
@@ -1165,15 +1302,8 @@ void cpu_interrupt_nmi(CPU *cpu)
 
 void cpu_init(CPU *cpu)
 {
-    int i = 0;
-
-    //for (; i < 65535; i++)
-    //    cpu->memory[i] = 0;
-
-    for (i = 0; i < 2048; i++)
+    for (int i = 0; i < 2048; i++)
         cpu->bus.cpu_vram[i] = 0;
-
-    //memcpy(&cpu->memory[0x8000], cpu->bus.rom.prg_rom, cpu->bus.rom.prg_len);
 
     cpu->register_a = 0;
     cpu->register_x = 0;
@@ -1181,8 +1311,6 @@ void cpu_init(CPU *cpu)
     cpu->status = 0x24;
     cpu->stack_pointer = 0xFD;     
     cpu->program_counter = cpu_mem_read_u16(cpu, 0xFFFC);
-                                   //   ... should be the standard 
-                                   //   testing with 0xC000 nestest.rom  
     cpu->cycles = 0;
     cpu->bus.cycles = 0;
     cpu->bus.prg_rom = cpu->bus.rom.prg_rom;
@@ -4013,7 +4141,7 @@ void cpu_interpret(CPU *cpu)
     //    cpu->program_counter += (unsigned short)opscode - 1;
 }
 
-void cpu_test(Emulator *emu)
+void cpu_test(CPU *cpu)
 {
     FILE *f;
 
@@ -4023,8 +4151,6 @@ void cpu_test(Emulator *emu)
         return;
     }
 
-    CPU *cpu = &emu->cpu;
-    
     int test_counter = 1;
 
     while (test_counter < 8992)
@@ -4077,27 +4203,27 @@ void test_format_mem_access(const char *filename)
 
     fclose(f);
     
-    Emulator emu;
+    CPU cpu;
 
     printf("reset rom\n");
-    rom_init(&emu.cpu.bus.rom);
+    rom_init(&cpu.bus.rom);
 
     printf("rom load\n");
-    if (!rom_load(&emu.cpu.bus.rom, file_buffer))
+    if (!rom_load(&cpu.bus.rom, file_buffer))
     {
         printf("Could not load file buffer!\n");
         return;
     }
 
     printf("reset cpu\n");
-    cpu_init(&emu.cpu);
-    ppu_load(&emu.cpu.bus.ppu, emu.cpu.bus.rom.chr_rom, emu.cpu.bus.rom.screen_mirroring);
-    addr_reset(&emu.cpu.bus.ppu.addr);
+    cpu_init(&cpu);
+    ppu_load(&cpu.bus.ppu, cpu.bus.rom.chr_rom, cpu.bus.rom.screen_mirroring);
+    addr_reset(&cpu.bus.ppu.addr);
 
-    cpu_test(&emu);
+    cpu_test(&cpu);
 
     printf("free file buffer\n");
     free(file_buffer);
 
-    bus_free_rom(&emu.cpu.bus.rom);
+    bus_free_rom(&cpu.bus.rom);
 }

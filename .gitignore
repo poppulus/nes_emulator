@@ -1,4 +1,5 @@
 .vscode
+/gl_test
 test.c
 a.out
 main
@@ -6,3 +7,4 @@ test
 super.nes
 pac.nes
 test_rom
+gtk2_test.c
