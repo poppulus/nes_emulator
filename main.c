@@ -13,11 +13,12 @@ bool quit;
 
 static void close_window()
 {
+    /*
     int err = Pa_Terminate();
 
     if (err != paNoError)
         printf("PortAudio error: %s\n", Pa_GetErrorText(err));
-
+    */
     rom_reset(&cpu.bus.rom);
     glDeleteTextures(1, &texture);
 
@@ -146,10 +147,15 @@ static void emu_init(CPU *cpu, Frame *frame)
         return;
     }
 
-    unsigned char *file_buffer;
+    fseek(f, 0L, SEEK_END);
+    long size = ftell(f);
+
+    printf("file size:%ld\n", size);
+
+    unsigned char *file_buffer = malloc(size);
     int i = 0;
 
-    file_buffer = malloc(40976);
+    rewind(f);
 
     while (!feof(f))
     {
@@ -176,6 +182,9 @@ static void emu_init(CPU *cpu, Frame *frame)
     addr_reset(&cpu->bus.ppu.addr);
 
     frame_init(frame);
+
+    // test this
+    cpu->bus.ppu.frame = frame;
 }
 
 void reshape(int width, int height)
@@ -208,7 +217,7 @@ int main(int argc, char *argv[])
 
     glutKeyboardFunc(key_down);
     glutKeyboardUpFunc(key_up);
-
+    /*
     int err = Pa_Initialize();
 
     if (err != paNoError)
@@ -216,7 +225,7 @@ int main(int argc, char *argv[])
         printf("PortAudio error: %s\n", Pa_GetErrorText(err));
         goto quit;
     }
-
+    */
     memset(key_states, false, 256);
 
     emu_init(&cpu, &frame);
@@ -225,13 +234,13 @@ int main(int argc, char *argv[])
 
     glutMainLoop();
 
-quit:
-
+//quit:
+    /*
     err = Pa_Terminate();
 
     if (err != paNoError)
         printf("PortAudio error: %s\n", Pa_GetErrorText(err));
-
+    */
     rom_reset(&cpu.bus.rom);
     glDeleteTextures(1, &texture);
 

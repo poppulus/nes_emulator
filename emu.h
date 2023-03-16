@@ -19,8 +19,10 @@ typedef unsigned short uint16_t;
 #define FRAME_HEIGHT        240
 // value of width * height * 3
 #define FRAME_LENGTH        184320
-// width of frame/screen * 3 = 256 * 3
+// width of frame width * 3 = 256 * 3
 #define FRAME_PITCH         768
+
+#define TEST_FRAME_LENGTH   61440 
 
 enum Mirroring
 {
@@ -268,6 +270,8 @@ typedef struct PPU
 
     AddrRegister            addr;
     ScrollRegister          scroll;
+
+    Frame                   *frame;
 } PPU;
 
 typedef struct Rom
@@ -315,25 +319,35 @@ void apu_pulse_set_sweep(Pulse *pulse, uint8_t data);
 
 void apu_triangle_set_counter_hi_timer(Triangle *triangle, uint8_t data);
 
-
 void joypad_init(Joypad *joypad);
 void joypad_write(Joypad *joypad, uint8_t data);
 uint8_t joypad_read(Joypad *joypad);
 
 void frame_init(Frame *frame);
-void frame_set_pixel(Frame *frame, short x, short y, uint8_t rgb[3]);
+void frame_set_pixel(uint8_t frame[], short x, short y, uint8_t rgb[3]);
 
 Palette bg_palette(PPU *ppu, uint8_t *attr_table, uint8_t tile_column, uint8_t tile_row);
 Palette ppu_sprite_palette(PPU *ppu, uint8_t palette_idx);
 
 void ppu_render_name_table(PPU *ppu, 
                             Frame *frame, 
+                            uint8_t test_frame[],
                             uint8_t *name_table, 
                             Rect viewport, 
                             short shift_x, 
                             short shift_y);
 
 void ppu_render(PPU *ppu, Frame *frame);
+
+void ppu_render_scanline_sprite(PPU *ppu, uint8_t frame[], uint8_t test[]);
+void ppu_render_scanline_nametable(PPU *ppu,
+                                        unsigned char vfb[], 
+                                        unsigned char *name_table, 
+                                        Rect viewport,
+                                        short shift_x, 
+                                        short shift_y);
+
+void ppu_render_scanline(PPU *ppu, uint8_t frame[]);
 
 extern void cpu_callback(Bus *bus);
 

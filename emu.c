@@ -16,6 +16,8 @@ uint8_t NES_PALETTE[192] = {
     0x99,0xFF,0xFC, 0xDD,0xDD,0xDD, 0x11,0x11,0x11, 0x11,0x11,0x11
 };
 
+uint8_t test_frame[TEST_FRAME_LENGTH];
+
 void apu_pulse_set_duty(Pulse *pulse, uint8_t data)
 {
     switch (data >> 6)
@@ -251,17 +253,19 @@ void frame_init(Frame *frame)
 {
     for (int i = 0; i < FRAME_LENGTH; i++)
         frame->data[i] = 0;
+
+    memset(test_frame, 0, TEST_FRAME_LENGTH);
 }
 
-void frame_set_pixel(Frame *frame, short x, short y, unsigned char rgb[3])
+void frame_set_pixel(uint8_t frame[], short x, short y, unsigned char rgb[3])
 {
-    int base = (y * 3 * FRAME_WIDTH) + (x * 3);
+    int base = ((y * 3) << 8) + (x * 3);
 
     if ((base + 2) < FRAME_LENGTH)
     {
-        frame->data[base] = rgb[0];
-        frame->data[base + 1] = rgb[1];
-        frame->data[base + 2] = rgb[2];
+        frame[base] = rgb[0];
+        frame[base + 1] = rgb[1];
+        frame[base + 2] = rgb[2];
     }
 }
 
@@ -321,7 +325,8 @@ Palette bg_palette(PPU *ppu, unsigned char *attr_table, unsigned char tile_colum
 
 void ppu_render_name_table(
     PPU *ppu, 
-    Frame *frame, 
+    Frame *frame,
+    unsigned char test_frame[], 
     unsigned char *name_table, 
     Rect viewport,
     short shift_x, 
@@ -334,14 +339,14 @@ void ppu_render_name_table(
     {
         unsigned char   tile_idx = name_table[i], 
                         tile_column = i % 32,
-                        tile_row = i / 32,
-                        *tile = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
+                        tile_row = i >> 5,
+                        *tile = &ppu->chr_rom[(bank ? 0x1000 : 0) + (tile_idx << 4)];
 
         Palette         palette = bg_palette(ppu, attr_table, tile_column, tile_row);
 
         for (int y = 0; y <= 7; y++)
         {
-            unsigned char   upper = tile[y],
+            unsigned char   upper = tile[y], 
                             lower = tile[y + 8];
 
             for (int x = 7; x >= 0; x--)
@@ -372,14 +377,27 @@ void ppu_render_name_table(
                         break;
                 }
 
-                unsigned char   pixel_x = (tile_column * 8) + x,
-                                pixel_y = (tile_row * 8) + y;
+                unsigned char   pixel_x = (tile_column << 3) + x,
+                                pixel_y = (tile_row << 3) + y;
 
                 if (pixel_x >= viewport.x1 && pixel_x < viewport.x2 
                 && pixel_y >= viewport.y1 && pixel_y < viewport.y2)
                 {
+                    // for testing
+                    //unsigned char   xpos = shift_x + pixel_x >> 5,
+                    //                ypos = xpos * shift_y + pixel_y;
+
+                    // 1 << (xpos >> 3)
+
+                    int base = (shift_y + pixel_y) * FRAME_WIDTH + (shift_x + pixel_x);
+                    if (value != 0)
+                    {
+                        if (base < TEST_FRAME_LENGTH)
+                            test_frame[base] = 1;
+                    }
+                    //
                     frame_set_pixel(
-                        frame, 
+                        frame->data, 
                         (short)(shift_x + pixel_x), 
                         (short)(shift_y + pixel_y), 
                         rgb);
@@ -454,6 +472,7 @@ void ppu_render(PPU *ppu, Frame *frame)
     ppu_render_name_table(
         ppu, 
         frame, 
+        test_frame,
         main_nametable, 
         rect, 
         (short)-scroll_x, (short)-scroll_y);
@@ -468,6 +487,7 @@ void ppu_render(PPU *ppu, Frame *frame)
         ppu_render_name_table(
             ppu, 
             frame, 
+            test_frame,
             second_nametable, 
             rect, 
             (short)256 - scroll_x, 0);
@@ -482,6 +502,7 @@ void ppu_render(PPU *ppu, Frame *frame)
         ppu_render_name_table(
             ppu, 
             frame, 
+            test_frame,
             second_nametable, 
             rect, 
             0, (short)240 - scroll_y);
@@ -502,7 +523,7 @@ void ppu_render(PPU *ppu, Frame *frame)
         Palette         sprite_palette      = ppu_sprite_palette(ppu, palette_idx);
 
         unsigned char   bank                = ppu->ctrl & SPRITE_PATTERN_ADDR,
-                        *tile               = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
+                        *tile               = &ppu->chr_rom[(bank ? 0x1000 : 0) + (tile_idx << 4)];
 
         for (int y = 0; y <= 7; y++)
         {
@@ -511,10 +532,6 @@ void ppu_render(PPU *ppu, Frame *frame)
 
             for (int x = 7; x >= 0; x--)
             {
-                //bool behind_background   = ppu->oam_data[i + 2] & 0b00100000 ? true : false;
-
-                //if (behind_background) continue;
-
                 unsigned char value = (1 & lower) << 1 | (1 & upper);
 
                 upper >>= 1;
@@ -539,39 +556,377 @@ void ppu_render(PPU *ppu, Frame *frame)
                         break;
                 }
 
+                int base;
+
                 switch (flip_horizontal)
                 {
                     case false:
                         if (flip_vertical == false)
+                        {
+                            if (ppu->oam_data[i + 2] & 0b00100000)
+                            {
+                                base = ((tile_y + y) << 8) + (tile_x + x);
+
+                                if (base < TEST_FRAME_LENGTH && test_frame[base] == 1)
+                                    continue;
+                            }
                             frame_set_pixel(
-                                frame, 
+                                frame->data, 
                                 (short)tile_x + x, 
                                 (short)tile_y + y, 
                                 rgb);
+                        }
                         else
+                        {
+                            if (ppu->oam_data[i + 2] & 0b00100000)
+                            {
+                                base = ((tile_y + 7 - y) << 8) + (tile_x + x);
+
+                                if (base < TEST_FRAME_LENGTH && test_frame[base] == 1)
+                                    continue;
+                            }
                             frame_set_pixel(
-                                frame, 
+                                frame->data, 
                                 (short)tile_x + x, 
                                 (short)tile_y + 7 - y, 
                                 rgb);
+                        }
                         break;
                     case true:
                         if (flip_vertical == false)
+                        {
+                            if (ppu->oam_data[i + 2] & 0b00100000)
+                            {
+                                base = ((tile_y + y) << 8) + (tile_x + 7 - x);
+
+                                if (base < TEST_FRAME_LENGTH && test_frame[base] == 1)
+                                    continue;
+                            }
                             frame_set_pixel(
-                                frame, 
+                                frame->data, 
                                 (short)tile_x + 7 - x, 
                                 (short)tile_y + y, 
                                 rgb);
+                        }
                         else
+                        {
+                            if (ppu->oam_data[i + 2] & 0b00100000)
+                            {
+                                base = ((tile_y + 7 - y) << 8) + (tile_x + 7 - x);
+
+                                if (base < TEST_FRAME_LENGTH && test_frame[base] == 1)
+                                    continue;
+                            }
                             frame_set_pixel(
-                                frame, 
+                                frame->data, 
                                 (short)tile_x + 7 - x, 
                                 (short)tile_y + 7 - y, 
                                 rgb);
+                        }
                         break;
                 }
             }
         }
+    }
+
+    memset(test_frame, 0, TEST_FRAME_LENGTH);
+}
+
+void ppu_render_scanline_sprite(PPU *ppu, uint8_t frame[], uint8_t test[])
+{
+    for (int i = 252; i >= 0; i -= 4)
+    {
+        unsigned char   tile_y              = ppu->oam_data[i],
+                        tile_idx            = ppu->oam_data[i + 1],
+                        tile_x              = ppu->oam_data[i + 3];
+
+        bool            flip_vertical       = ppu->oam_data[i + 2] & 0b10000000 ? true : false,
+                        flip_horizontal     = ppu->oam_data[i + 2] & 0b01000000 ? true : false;
+
+        unsigned char   palette_idx         = ppu->oam_data[i + 2] & 0b11;
+
+        Palette         sprite_palette      = ppu_sprite_palette(ppu, palette_idx);
+
+        unsigned char   bank                = ppu->ctrl & SPRITE_PATTERN_ADDR,
+                        *tile               = &ppu->chr_rom[(bank ? 0x1000 : 0) + tile_idx * 16];
+
+        for (int y = 0; y < 8; y++)
+        {
+            if ((tile_y * 8 + y) == ppu->scanline - 1)
+            {
+                unsigned char   upper = tile[y],
+                                lower = tile[y + 8];
+
+                for (int x = 7; x >= 0; x--)
+                {
+                    unsigned char value = (1 & lower) << 1 | (1 & upper);
+
+                    upper >>= 1;
+                    lower >>= 1;
+
+                    unsigned char *rgb;
+
+                    switch (value)
+                    {
+                        default:
+                            // should not happen
+                        case 0:
+                            continue;
+                        case 1:
+                            rgb = &NES_PALETTE[sprite_palette.p2 * 3];
+                            break;
+                        case 2:
+                            rgb = &NES_PALETTE[sprite_palette.p3 * 3];
+                            break;
+                        case 3:
+                            rgb = &NES_PALETTE[sprite_palette.p4 * 3];
+                            break;
+                    }
+
+                    int base;
+
+                    switch (flip_horizontal)
+                    {
+                        case false:
+                            if (flip_vertical == false)
+                            {
+                                if (ppu->oam_data[i + 2] & 0b00100000)
+                                {
+                                    base = tile_x + x;
+
+                                    if (base < 256 && test[base] == 1)
+                                        continue;
+                                }
+                                frame_set_pixel(
+                                    frame, 
+                                    (short)tile_x + x, 
+                                    (short)tile_y + y, 
+                                    rgb);
+                            }
+                            else
+                            {
+                                if (ppu->oam_data[i + 2] & 0b00100000)
+                                {
+                                    base = tile_x + x;
+
+                                    if (base < 256 && test[base] == 1)
+                                        continue;
+                                }
+                                frame_set_pixel(
+                                    frame, 
+                                    (short)tile_x + x, 
+                                    (short)tile_y + 7 - y, 
+                                    rgb);
+                            }
+                            break;
+                        case true:
+                            if (flip_vertical == false)
+                            {
+                                if (ppu->oam_data[i + 2] & 0b00100000)
+                                {
+                                    base = tile_x + 7 - x;
+
+                                    if (base < 256 && test[base] == 1)
+                                        continue;
+                                }
+                                frame_set_pixel(
+                                    frame, 
+                                    (short)tile_x + 7 - x, 
+                                    (short)tile_y + y, 
+                                    rgb);
+                            }
+                            else
+                            {
+                                if (ppu->oam_data[i + 2] & 0b00100000)
+                                {
+                                    base = tile_x + 7 - x;
+
+                                    if (base < 256 && test[base] == 1)
+                                        continue;
+                                }
+                                frame_set_pixel(
+                                    frame, 
+                                    (short)tile_x + 7 - x, 
+                                    (short)tile_y + 7 - y, 
+                                    rgb);
+                            }
+                            break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+void ppu_render_scanline_nametable(
+    PPU *ppu,
+    unsigned char vfb[], 
+    unsigned char *name_table, 
+    Rect viewport,
+    short shift_x, 
+    short shift_y)
+{
+    unsigned char   bank        = ppu->ctrl & BACKGROUND_PATTERN_ADDR,
+                    *attr_table = &name_table[0x3C0];
+
+    //unsigned char test_vfb[256];
+    //memset(test_vfb, 0, 256);
+
+    for (int i = 0; i < 0x3C0; i++)
+    {
+        unsigned char   tile_idx = name_table[i], 
+                        tile_column = i % 32,
+                        tile_row = i >> 5,
+                        *tile = &ppu->chr_rom[(bank ? 0x1000 : 0) + (tile_idx << 4)];
+
+        Palette         palette = bg_palette(ppu, attr_table, tile_column, tile_row);
+
+
+        for (int y = 0; y < 8; y++)
+        {
+            if ((tile_row * 8 + y) == ppu->scanline - 1)
+            {
+                unsigned char   upper = tile[y],
+                                lower = tile[y + 8];
+
+                for (int x = 7; x >= 0; x--)
+                {
+                    unsigned char value = (1 & lower) << 1 | (1 & upper);
+
+                    upper >>= 1;
+                    lower >>= 1;
+
+                    unsigned char *rgb;
+
+                    switch (value)
+                    {
+                        case 0:
+                            rgb = &NES_PALETTE[palette.p1 * 3];
+                            break;
+                        case 1:
+                            rgb = &NES_PALETTE[palette.p2 * 3];
+                            break;
+                        case 2:
+                            rgb = &NES_PALETTE[palette.p3 * 3];
+                            break;
+                        case 3:
+                            rgb = &NES_PALETTE[palette.p4 * 3];
+                            break;
+                        default: 
+                            // should not be
+                            break;
+                    }
+
+                    unsigned char   pixel_x = (tile_column << 3) + x,
+                                    pixel_y = (tile_row << 3) + y;
+
+                    if (pixel_x >= viewport.x1 && pixel_x < viewport.x2 
+                    && pixel_y >= viewport.y1 && pixel_y < viewport.y2)
+                    {
+                        // for testing
+                        /*
+                        int base = (shift_y + pixel_y) * FRAME_WIDTH + (shift_x + pixel_x);
+                        if (value != 0)
+                        {
+                            //if (base < TEST_FRAME_LENGTH)
+                                //test_frame[base] = 1;
+                        }
+                        //
+                        */
+
+                        frame_set_pixel(vfb, (short)shift_x + pixel_x, (short)shift_y + pixel_y, rgb);
+                        /*
+                        if (value != 0)
+                        {
+                            if (shift_x + pixel_x < 256)
+                                test_vfb[shift_x + pixel_x] = 1;
+                        }
+                        */
+                    }
+                }
+            }
+        }
+    }
+
+    //ppu_render_scanline_sprite(ppu, vfb, test_vfb);
+}
+
+void ppu_render_scanline(PPU *ppu, uint8_t frame[])
+{
+    //unsigned char   vfb_scanline[FRAME_PITCH];
+    //memset(vfb_scanline, 0, FRAME_PITCH);
+
+    unsigned char   scroll_x = ppu->scroll.x,
+                    scroll_y = ppu->scroll.y;
+
+    unsigned char   *main_nametable, 
+                    *second_nametable,
+                    name_table = ppu->ctrl & 0b11;
+
+    Rect rect;
+
+    switch (ppu->mirroring)
+    {
+        case VERTICAL:
+            if (name_table == 0 || name_table == 2)
+            {
+                main_nametable = &ppu->vram[0];
+                second_nametable = &ppu->vram[0x400];
+            }
+            else if (name_table == 1 || name_table == 3)
+            {
+                main_nametable = &ppu->vram[0x400];
+                second_nametable = &ppu->vram[0];
+            }
+            break;
+        case HORIZONTAL:
+            if (name_table == 0 || name_table == 1)
+            {
+                main_nametable = &ppu->vram[0];
+                second_nametable = &ppu->vram[0x400];
+            }
+            else if (name_table == 2 || name_table == 3)
+            {
+                main_nametable = &ppu->vram[0x400];
+                second_nametable = &ppu->vram[0];
+            }
+        case FOUR_SCREEN:
+        default:
+            main_nametable = &ppu->vram[0];
+            second_nametable = &ppu->vram[0x400];
+            break;
+    }
+
+    rect.x1 = scroll_x;
+    rect.y1 = scroll_y;
+    rect.x2 = 256;
+    rect.y2 = 240;
+
+    ppu_render_scanline_nametable(
+        ppu, frame, main_nametable, rect, (short)-scroll_x, (short)-scroll_y
+    );
+
+    if (scroll_x > 0)
+    {
+        rect.x1 = 0;
+        rect.y1 = 0;
+        rect.x2 = scroll_x;
+        rect.y2 = 240;
+        
+        ppu_render_scanline_nametable(
+            ppu, frame, second_nametable, rect, (short)256 - scroll_x, 0
+        );
+    }
+    else if (scroll_y > 0)
+    {
+        rect.x1 = 0;
+        rect.y1 = 0;
+        rect.x2 = 256;
+        rect.y2 = scroll_y;
+        
+        ppu_render_scanline_nametable(
+            ppu, frame, second_nametable, rect, 0, (short)240 - scroll_y
+        );
     }
 }
 
@@ -639,7 +994,7 @@ bool ppu_is_sprite_0_hit(PPU *ppu)
 bool ppu_tick(PPU *ppu, unsigned short cycles)
 {
     ppu->cycles += cycles;
-
+    /*
     if (ppu->cycles >= 1 && ppu->cycles <= 64)
     {
         
@@ -655,14 +1010,20 @@ bool ppu_tick(PPU *ppu, unsigned short cycles)
     {
         ppu->oam_addr = 0;
     }
-    else if (ppu->cycles >= 341)
+    */
+    if (ppu->cycles >= 341)
     {
         if (ppu_is_sprite_0_hit(ppu))
             ppu->status |= SPRITE_0_HIT;
 
         ppu->cycles -= 341;
         ppu->scanline += 1;
-
+        /*
+        if (ppu->scanline <= 241)
+        {
+            ppu_render_scanline(ppu, ppu->frame->data);
+        }
+        */
         if (ppu->scanline == 241)
         {
             ppu->status |= VERTICAL_BLANK;
